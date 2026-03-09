@@ -2,8 +2,9 @@
 // Cloudflare Workers + Durable Objects
 //
 // Endpoints:
-//   /ws         — Client WebSocket connections
-//   /relay/:id  — Relay WebSocket (1:1 exclusive coupling to a client)
+//   /ws         — Agent WebSocket connections
+//   /relay/:id  — Relay WebSocket (1:1 exclusive coupling to an agent)
+//   /events     — Live WebSocket feed of agent connect/disconnect events
 //   /           — Status info (JSON)
 
 export interface Env {
@@ -27,6 +28,10 @@ export default {
 			return stub.fetch(request);
 		}
 
+		if (url.pathname === "/events") {
+			return stub.fetch(request);
+		}
+
 		const relayMatch = url.pathname.match(/^\/relay\/(.+)$/);
 		if (relayMatch) {
 			return stub.fetch(request);
@@ -38,7 +43,7 @@ export default {
 
 // ─── Connection Types ─────────────────────────────────────────────────
 
-interface ClientInfo {
+interface AgentInfo {
 	ip: string;
 	country: string;
 	city: string;
@@ -56,12 +61,12 @@ interface ClientInfo {
 	httpVersion: string;
 }
 
-interface ClientConn {
+interface AgentConn {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
 	relayId: string | null;
-	info: ClientInfo;
+	info: AgentInfo;
 	messageCount: number;
 	lastActiveAt: number;
 }
@@ -70,14 +75,15 @@ interface RelayConn {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	clientId: string;
+	agentId: string;
 }
 
 // ─── Durable Object: WebSocketPool ────────────────────────────────────
 
 export class WebSocketPool {
-	private clients: Map<string, ClientConn> = new Map();
+	private agents: Map<string, AgentConn> = new Map();
 	private relays: Map<string, RelayConn> = new Map();
+	private eventListeners: Set<WebSocket> = new Set();
 	private idCounter: number = 0;
 
 	constructor(
@@ -93,7 +99,11 @@ export class WebSocketPool {
 		}
 
 		if (url.pathname === "/ws") {
-			return this.handleClientUpgrade(request);
+			return this.handleAgentUpgrade(request);
+		}
+
+		if (url.pathname === "/events") {
+			return this.handleEventsUpgrade(request);
 		}
 
 		const relayMatch = url.pathname.match(/^\/relay\/(.+)$/);
@@ -107,20 +117,20 @@ export class WebSocketPool {
 	// ── Status endpoint ──────────────────────────────────────────────
 
 	private handleStatus(): Response {
-		const clients = Array.from(this.clients.values()).map((c) => ({
-			id: c.id,
-			connectedAt: c.connectedAt,
-			relayed: c.relayId !== null,
-			relayId: c.relayId,
-			messageCount: c.messageCount,
-			lastActiveAt: c.lastActiveAt,
-			...c.info,
+		const agents = Array.from(this.agents.values()).map((a) => ({
+			id: a.id,
+			connectedAt: a.connectedAt,
+			relayed: a.relayId !== null,
+			relayId: a.relayId,
+			messageCount: a.messageCount,
+			lastActiveAt: a.lastActiveAt,
+			...a.info,
 		}));
 
 		const relays = Array.from(this.relays.values()).map((r) => ({
 			id: r.id,
 			connectedAt: r.connectedAt,
-			clientId: r.clientId,
+			agentId: r.agentId,
 		}));
 
 		return new Response(
@@ -130,10 +140,11 @@ export class WebSocketPool {
 				repo: "https://github.com/mrzaxaryan/relay",
 				endpoints: {
 					"GET /": "Status and service info (this response)",
-					"WS /ws": "Client WebSocket — receives { type: 'identity', id } on connect",
-					"WS /relay/:clientId": "Relay WebSocket — 1:1 exclusive coupling to a client (404 if not found, 409 if already relayed)",
+					"WS /ws": "Agent WebSocket — receives { type: 'identity', id } on connect",
+					"WS /relay/:agentId": "Relay WebSocket — 1:1 exclusive coupling to an agent (404 if not found, 409 if already relayed)",
+					"WS /events": "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events",
 				},
-				clients: { count: clients.length, connections: clients },
+				agents: { count: agents.length, connections: agents },
 				relays: { count: relays.length, connections: relays },
 			}, null, 2),
 			{
@@ -145,9 +156,9 @@ export class WebSocketPool {
 		);
 	}
 
-	// ── Client WebSocket ─────────────────────────────────────────────
+	// ── Events WebSocket (live agent feed) ───────────────────────────
 
-	private handleClientUpgrade(request: Request): Response {
+	private handleEventsUpgrade(request: Request): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426 });
@@ -156,9 +167,57 @@ export class WebSocketPool {
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 
-		const id = `client-${++this.idCounter}-${Date.now().toString(36)}`;
+		server.accept();
+		this.eventListeners.add(server);
+
+		// Send current agents snapshot
+		const agents = Array.from(this.agents.values()).map((a) => ({
+			id: a.id,
+			connectedAt: a.connectedAt,
+			relayed: a.relayId !== null,
+			relayId: a.relayId,
+			messageCount: a.messageCount,
+			lastActiveAt: a.lastActiveAt,
+			...a.info,
+		}));
+
+		trySend(server, { type: "agents", agents });
+
+		server.addEventListener("close", () => {
+			this.eventListeners.delete(server);
+		});
+
+		server.addEventListener("error", () => {
+			this.eventListeners.delete(server);
+		});
+
+		return new Response(null, { status: 101, webSocket: client });
+	}
+
+	private broadcastEvent(event: object): void {
+		for (const ws of this.eventListeners) {
+			try {
+				ws.send(JSON.stringify(event));
+			} catch {
+				this.eventListeners.delete(ws);
+			}
+		}
+	}
+
+	// ── Agent WebSocket ─────────────────────────────────────────────
+
+	private handleAgentUpgrade(request: Request): Response {
+		const upgrade = request.headers.get("Upgrade");
+		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
+			return new Response("Expected WebSocket upgrade", { status: 426 });
+		}
+
+		const pair = new WebSocketPair();
+		const [client, server] = [pair[0], pair[1]];
+
+		const id = `agent-${++this.idCounter}-${Date.now().toString(36)}`;
 		const cf = (request as any).cf || {};
-		const conn: ClientConn = {
+		const conn: AgentConn = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
@@ -184,26 +243,39 @@ export class WebSocketPool {
 			lastActiveAt: Date.now(),
 		};
 
-		this.clients.set(id, conn);
+		this.agents.set(id, conn);
 		server.accept();
 
+		this.broadcastEvent({
+			type: "agent_connected",
+			agent: {
+				id: conn.id,
+				connectedAt: conn.connectedAt,
+				relayed: false,
+				relayId: null,
+				messageCount: 0,
+				lastActiveAt: conn.lastActiveAt,
+				...conn.info,
+			},
+		});
+
 		server.addEventListener("message", (event) => {
-			this.onClientMessage(id, event.data);
+			this.onAgentMessage(id, event.data);
 		});
 
 		server.addEventListener("close", () => {
-			this.onClientDisconnect(id);
+			this.onAgentDisconnect(id);
 		});
 
 		server.addEventListener("error", () => {
-			this.onClientDisconnect(id);
+			this.onAgentDisconnect(id);
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
-	private onClientMessage(clientId: string, data: string | ArrayBuffer): void {
-		const conn = this.clients.get(clientId);
+	private onAgentMessage(agentId: string, data: string | ArrayBuffer): void {
+		const conn = this.agents.get(agentId);
 		if (!conn) return;
 
 		conn.messageCount++;
@@ -225,16 +297,16 @@ export class WebSocketPool {
 		}
 	}
 
-	private onClientDisconnect(clientId: string): void {
-		const conn = this.clients.get(clientId);
+	private onAgentDisconnect(agentId: string): void {
+		const conn = this.agents.get(agentId);
 		if (!conn) return;
 
 		if (conn.relayId) {
 			const relay = this.relays.get(conn.relayId);
 			if (relay) {
-				trySend(relay.ws, { type: "client_disconnected", clientId });
+				trySend(relay.ws, { type: "agent_disconnected", agentId });
 				try {
-					relay.ws.close(1000, "client disconnected");
+					relay.ws.close(1000, "agent disconnected");
 				} catch {}
 				this.relays.delete(conn.relayId);
 			}
@@ -243,28 +315,30 @@ export class WebSocketPool {
 		try {
 			conn.ws.close(1000, "disconnect");
 		} catch {}
-		this.clients.delete(clientId);
+		this.agents.delete(agentId);
+
+		this.broadcastEvent({ type: "agent_disconnected", agentId });
 	}
 
 	// ── Relay WebSocket ──────────────────────────────────────────────
 
-	private handleRelayUpgrade(request: Request, clientId: string): Response {
+	private handleRelayUpgrade(request: Request, agentId: string): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426 });
 		}
 
-		const client = this.clients.get(clientId);
-		if (!client) {
+		const agent = this.agents.get(agentId);
+		if (!agent) {
 			return new Response(
-				JSON.stringify({ error: "client_not_found", clientId }),
+				JSON.stringify({ error: "agent_not_found", agentId }),
 				{ status: 404, headers: { "Content-Type": "application/json" } }
 			);
 		}
 
-		if (client.relayId) {
+		if (agent.relayId) {
 			return new Response(
-				JSON.stringify({ error: "client_already_relayed", clientId, relayId: client.relayId }),
+				JSON.stringify({ error: "agent_already_relayed", agentId, relayId: agent.relayId }),
 				{ status: 409, headers: { "Content-Type": "application/json" } }
 			);
 		}
@@ -277,14 +351,14 @@ export class WebSocketPool {
 			id: relayId,
 			ws: server,
 			connectedAt: Date.now(),
-			clientId,
+			agentId,
 		};
 
 		this.relays.set(relayId, conn);
-		client.relayId = relayId;
+		agent.relayId = relayId;
 		server.accept();
 
-		server.send(JSON.stringify({ type: "coupled", relayId, clientId }));
+		server.send(JSON.stringify({ type: "coupled", relayId, agentId }));
 
 		server.addEventListener("message", (event) => {
 			this.onRelayMessage(relayId, event.data);
@@ -305,17 +379,17 @@ export class WebSocketPool {
 		const relay = this.relays.get(relayId);
 		if (!relay) return;
 
-		const client = this.clients.get(relay.clientId);
-		if (!client) return;
+		const agent = this.agents.get(relay.agentId);
+		if (!agent) return;
 
 		try {
 			if (typeof data === "string") {
-				client.ws.send(data);
+				agent.ws.send(data);
 			} else {
-				client.ws.send(data);
+				agent.ws.send(data);
 			}
 		} catch {
-			this.onClientDisconnect(relay.clientId);
+			this.onAgentDisconnect(relay.agentId);
 		}
 	}
 
@@ -323,9 +397,9 @@ export class WebSocketPool {
 		const relay = this.relays.get(relayId);
 		if (!relay) return;
 
-		const client = this.clients.get(relay.clientId);
-		if (client) {
-			client.relayId = null;
+		const agent = this.agents.get(relay.agentId);
+		if (agent) {
+			agent.relayId = null;
 		}
 
 		try {
