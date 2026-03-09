@@ -78,12 +78,24 @@ interface RelayConn {
 	agentId: string;
 }
 
+interface EventListenerConn {
+	id: string;
+	ws: WebSocket;
+	connectedAt: number;
+	info: {
+		ip: string;
+		country: string;
+		city: string;
+		userAgent: string;
+	};
+}
+
 // ─── Durable Object: WebSocketPool ────────────────────────────────────
 
 export class WebSocketPool {
 	private agents: Map<string, AgentConn> = new Map();
 	private relays: Map<string, RelayConn> = new Map();
-	private eventListeners: Set<WebSocket> = new Set();
+	private eventListeners: Map<string, EventListenerConn> = new Map();
 	private idCounter: number = 0;
 
 	constructor(
@@ -136,16 +148,28 @@ export class WebSocketPool {
 		return new Response(
 			JSON.stringify({
 				service: "relay",
-				description: "WebSocket relay server for Position-Independent-Agent",
-				repo: "https://github.com/mrzaxaryan/relay",
+				description: "WebSocket relay server for Position-Independent-Agent and Command Center",
+				repos: {
+					relay: "https://github.com/mrzaxaryan/relay",
+					agent: "https://github.com/mrzaxaryan/Position-Independent-Agent",
+					cc: "https://github.com/mrzaxaryan/cc",
+				},
 				endpoints: {
 					"GET /": "Status and service info (this response)",
-					"WS /ws": "Agent WebSocket — receives { type: 'identity', id } on connect",
+					"WS /ws": "Agent WebSocket connection",
 					"WS /relay/:agentId": "Relay WebSocket — 1:1 exclusive coupling to an agent (404 if not found, 409 if already relayed)",
-					"WS /events": "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events",
+					"WS /events": "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events. Connected listeners shown in status.",
 				},
 				agents: { count: agents.length, connections: agents },
 				relays: { count: relays.length, connections: relays },
+				eventListeners: {
+					count: this.eventListeners.size,
+					connections: Array.from(this.eventListeners.values()).map((e) => ({
+						id: e.id,
+						connectedAt: e.connectedAt,
+						...e.info,
+					})),
+				},
 			}, null, 2),
 			{
 				headers: {
@@ -167,8 +191,22 @@ export class WebSocketPool {
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 
+		const id = `listener-${++this.idCounter}-${Date.now().toString(36)}`;
+		const cf = (request as any).cf || {};
+		const conn: EventListenerConn = {
+			id,
+			ws: server,
+			connectedAt: Date.now(),
+			info: {
+				ip: request.headers.get("CF-Connecting-IP") || "",
+				country: cf.country || "",
+				city: cf.city || "",
+				userAgent: request.headers.get("User-Agent") || "",
+			},
+		};
+
 		server.accept();
-		this.eventListeners.add(server);
+		this.eventListeners.set(id, conn);
 
 		// Send current agents snapshot
 		const agents = Array.from(this.agents.values()).map((a) => ({
@@ -184,22 +222,23 @@ export class WebSocketPool {
 		trySend(server, { type: "agents", agents });
 
 		server.addEventListener("close", () => {
-			this.eventListeners.delete(server);
+			this.eventListeners.delete(id);
 		});
 
 		server.addEventListener("error", () => {
-			this.eventListeners.delete(server);
+			this.eventListeners.delete(id);
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private broadcastEvent(event: object): void {
-		for (const ws of this.eventListeners) {
+		const msg = JSON.stringify(event);
+		for (const [id, conn] of this.eventListeners) {
 			try {
-				ws.send(JSON.stringify(event));
+				conn.ws.send(msg);
 			} catch {
-				this.eventListeners.delete(ws);
+				this.eventListeners.delete(id);
 			}
 		}
 	}
