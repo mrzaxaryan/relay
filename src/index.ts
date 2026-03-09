@@ -16,33 +16,13 @@ export interface Env {
 
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		const url = new URL(request.url);
+		if (request.method === "OPTIONS") {
+			return new Response(null, { status: 204, headers: corsHeaders() });
+		}
 
 		const id = env.WS_POOL.idFromName("global");
 		const stub = env.WS_POOL.get(id);
-
-		if (url.pathname === "/") {
-			return stub.fetch(request);
-		}
-
-		if (url.pathname === "/health") {
-			return stub.fetch(request);
-		}
-
-		if (url.pathname === "/ws") {
-			return stub.fetch(request);
-		}
-
-		if (url.pathname === "/events") {
-			return stub.fetch(request);
-		}
-
-		const relayMatch = url.pathname.match(/^\/relay\/(.+)$/);
-		if (relayMatch) {
-			return stub.fetch(request);
-		}
-
-		return new Response("Not Found", { status: 404 });
+		return stub.fetch(request);
 	},
 };
 
@@ -132,7 +112,7 @@ export class WebSocketPool {
 			return this.handleRelayUpgrade(request, relayMatch[1]);
 		}
 
-		return new Response("Not Found", { status: 404 });
+		return new Response("Not Found", { status: 404, headers: corsHeaders() });
 	}
 
 	// ── API Documentation ───────────────────────────────────────────
@@ -266,26 +246,13 @@ export class WebSocketPool {
 			},
 		};
 
-		return new Response(JSON.stringify(docs, null, 2), {
-			headers: {
-				"Content-Type": "application/json",
-				"Access-Control-Allow-Origin": "*",
-			},
-		});
+		return jsonResponse(docs);
 	}
 
 	// ── Status endpoint ──────────────────────────────────────────────
 
 	private handleStatus(): Response {
-		const agents = Array.from(this.agents.values()).map((a) => ({
-			id: a.id,
-			connectedAt: a.connectedAt,
-			relayed: a.relayId !== null,
-			relayId: a.relayId,
-			messageCount: a.messageCount,
-			lastActiveAt: a.lastActiveAt,
-			...a.info,
-		}));
+		const agents = Array.from(this.agents.values()).map(agentStatus);
 
 		const relays = Array.from(this.relays.values()).map((r) => ({
 			id: r.id,
@@ -293,26 +260,18 @@ export class WebSocketPool {
 			agentId: r.agentId,
 		}));
 
-		return new Response(
-			JSON.stringify({
-				agents: { count: agents.length, connections: agents },
-				relays: { count: relays.length, connections: relays },
-				eventListeners: {
-					count: this.eventListeners.size,
-					connections: Array.from(this.eventListeners.values()).map((e) => ({
-						id: e.id,
-						connectedAt: e.connectedAt,
-						...e.info,
-					})),
-				},
-			}, null, 2),
-			{
-				headers: {
-					"Content-Type": "application/json",
-					"Access-Control-Allow-Origin": "*",
-				},
-			}
-		);
+		return jsonResponse({
+			agents: { count: agents.length, connections: agents },
+			relays: { count: relays.length, connections: relays },
+			eventListeners: {
+				count: this.eventListeners.size,
+				connections: Array.from(this.eventListeners.values()).map((e) => ({
+					id: e.id,
+					connectedAt: e.connectedAt,
+					...e.info,
+				})),
+			},
+		});
 	}
 
 	// ── Events WebSocket (live agent feed) ───────────────────────────
@@ -320,7 +279,7 @@ export class WebSocketPool {
 	private handleEventsUpgrade(request: Request): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
-			return new Response("Expected WebSocket upgrade", { status: 426 });
+			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
 		}
 
 		const pair = new WebSocketPair();
@@ -344,17 +303,10 @@ export class WebSocketPool {
 		this.eventListeners.set(id, conn);
 
 		// Send current agents snapshot
-		const agents = Array.from(this.agents.values()).map((a) => ({
-			id: a.id,
-			connectedAt: a.connectedAt,
-			relayed: a.relayId !== null,
-			relayId: a.relayId,
-			messageCount: a.messageCount,
-			lastActiveAt: a.lastActiveAt,
-			...a.info,
-		}));
-
-		trySend(server, { type: "agents", agents });
+		trySend(server, {
+			type: "agents",
+			agents: Array.from(this.agents.values()).map(agentStatus),
+		});
 
 		server.addEventListener("close", () => {
 			this.eventListeners.delete(id);
@@ -383,7 +335,7 @@ export class WebSocketPool {
 	private handleAgentUpgrade(request: Request): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
-			return new Response("Expected WebSocket upgrade", { status: 426 });
+			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
 		}
 
 		const pair = new WebSocketPair();
@@ -420,18 +372,7 @@ export class WebSocketPool {
 		this.agents.set(id, conn);
 		server.accept();
 
-		this.broadcastEvent({
-			type: "agent_connected",
-			agent: {
-				id: conn.id,
-				connectedAt: conn.connectedAt,
-				relayed: false,
-				relayId: null,
-				messageCount: 0,
-				lastActiveAt: conn.lastActiveAt,
-				...conn.info,
-			},
-		});
+		this.broadcastEvent({ type: "agent_connected", agent: agentStatus(conn) });
 
 		server.addEventListener("message", (event) => {
 			this.onAgentMessage(id, event.data);
@@ -461,11 +402,7 @@ export class WebSocketPool {
 		if (!relay) return;
 
 		try {
-			if (typeof data === "string") {
-				relay.ws.send(data);
-			} else {
-				relay.ws.send(data);
-			}
+			relay.ws.send(data);
 		} catch {
 			this.onRelayDisconnect(conn.relayId);
 		}
@@ -478,7 +415,6 @@ export class WebSocketPool {
 		if (conn.relayId) {
 			const relay = this.relays.get(conn.relayId);
 			if (relay) {
-				trySend(relay.ws, { type: "agent_disconnected", agentId });
 				try {
 					relay.ws.close(1000, "agent disconnected");
 				} catch {}
@@ -499,22 +435,16 @@ export class WebSocketPool {
 	private handleRelayUpgrade(request: Request, agentId: string): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
-			return new Response("Expected WebSocket upgrade", { status: 426 });
+			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
 		}
 
 		const agent = this.agents.get(agentId);
 		if (!agent) {
-			return new Response(
-				JSON.stringify({ error: "agent_not_found", agentId }),
-				{ status: 404, headers: { "Content-Type": "application/json" } }
-			);
+			return jsonResponse({ error: "agent_not_found", agentId }, 404);
 		}
 
 		if (agent.relayId) {
-			return new Response(
-				JSON.stringify({ error: "agent_already_relayed", agentId, relayId: agent.relayId }),
-				{ status: 409, headers: { "Content-Type": "application/json" } }
-			);
+			return jsonResponse({ error: "agent_already_relayed", agentId, relayId: agent.relayId }, 409);
 		}
 
 		const pair = new WebSocketPair();
@@ -531,8 +461,6 @@ export class WebSocketPool {
 		this.relays.set(relayId, conn);
 		agent.relayId = relayId;
 		server.accept();
-
-		server.send(JSON.stringify({ type: "coupled", relayId, agentId }));
 
 		server.addEventListener("message", (event) => {
 			this.onRelayMessage(relayId, event.data);
@@ -557,11 +485,7 @@ export class WebSocketPool {
 		if (!agent) return;
 
 		try {
-			if (typeof data === "string") {
-				agent.ws.send(data);
-			} else {
-				agent.ws.send(data);
-			}
+			agent.ws.send(data);
 		} catch {
 			this.onAgentDisconnect(relay.agentId);
 		}
@@ -584,6 +508,33 @@ export class WebSocketPool {
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────
+
+function corsHeaders(): HeadersInit {
+	return {
+		"Access-Control-Allow-Origin": "*",
+		"Access-Control-Allow-Methods": "GET, OPTIONS",
+		"Access-Control-Allow-Headers": "Content-Type, Upgrade",
+	};
+}
+
+function jsonResponse(body: object, status: number = 200): Response {
+	return new Response(JSON.stringify(body, null, 2), {
+		status,
+		headers: { "Content-Type": "application/json", ...corsHeaders() },
+	});
+}
+
+function agentStatus(a: AgentConn) {
+	return {
+		id: a.id,
+		connectedAt: a.connectedAt,
+		relayed: a.relayId !== null,
+		relayId: a.relayId,
+		messageCount: a.messageCount,
+		lastActiveAt: a.lastActiveAt,
+		...a.info,
+	};
+}
 
 function trySend(ws: WebSocket, data: object | string): void {
 	try {

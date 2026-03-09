@@ -2,37 +2,41 @@
 
 WebSocket relay server for [Position-Independent-Agent](https://github.com/mrzaxaryan/Position-Independent-Agent) — Cloudflare Workers + Durable Objects.
 
-A single Durable Object (`WebSocketPool`) holds all connections in memory, pairing clients with relay connections 1:1.
+A single Durable Object (`WebSocketPool`) holds all connections in memory, pairing agents with relay connections 1:1.
 
 ## Endpoints
 
 | Path | Type | Description |
 |------|------|-------------|
-| `/` | GET | JSON status — connected clients, active relays |
-| `/ws` | WebSocket | Client connections |
-| `/relay/:id` | WebSocket | Relay connection, auto-couples to client by ID (exclusive) |
+| `/` | GET | API documentation (JSON) |
+| `/health` | GET | Live status — connected agents, relays, event listeners |
+| `/ws` | WebSocket | Agent connections |
+| `/relay/:agentId` | WebSocket | Relay connection, auto-couples to agent by ID (exclusive) |
+| `/events` | WebSocket | Live feed of agent connect/disconnect events |
 
 ## How It Works
 
-1. A **client** connects to `/ws` and receives an `identity` message with its ID
-2. A **relay** connects to `/relay/:clientId` — this immediately couples it 1:1 with that client
+1. An **agent** connects to `/ws` — the server assigns an ID and broadcasts `agent_connected` to event listeners
+2. A **relay** connects to `/relay/:agentId` — this immediately couples it 1:1 with that agent and sends a `coupled` message
 3. All messages flow transparently between the paired WebSockets (string and binary)
 4. If either side disconnects, the pairing is cleaned up and the other side is notified
+5. **Event listeners** on `/events` receive a snapshot of all agents on connect, then live `agent_connected` / `agent_disconnected` events
 
 ### Constraints
 
-- Each client can have **at most one** relay at a time
-- Connecting to `/relay/:id` returns `404` if the client doesn't exist
-- Connecting to `/relay/:id` returns `409` if the client already has an active relay
+- Each agent can have **at most one** relay at a time
+- Connecting to `/relay/:agentId` returns `404` if the agent doesn't exist
+- Connecting to `/relay/:agentId` returns `409` if the agent already has an active relay
 
-## Status Endpoint
+## Health Endpoint
 
-`GET /` returns:
+`GET /health` returns:
 
 ```json
 {
-  "clients": { "count": 1, "connections": [{ "id": "...", "connectedAt": 0, "relayed": false }] },
-  "relays": { "count": 0, "connections": [] }
+  "agents": { "count": 1, "connections": [{ "id": "agent-1-...", "connectedAt": 0, "relayed": false, "relayId": null, "messageCount": 0, "lastActiveAt": 0, "ip": "...", "country": "...", ... }] },
+  "relays": { "count": 0, "connections": [] },
+  "eventListeners": { "count": 0, "connections": [] }
 }
 ```
 
