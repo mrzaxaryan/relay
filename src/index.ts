@@ -136,7 +136,12 @@ export class WebSocketPool {
 				clients: { count: clients.length, connections: clients },
 				relays: { count: relays.length, connections: relays },
 			}, null, 2),
-			{ headers: { "Content-Type": "application/json" } }
+			{
+				headers: {
+					"Content-Type": "application/json",
+					"Access-Control-Allow-Origin": "*",
+				},
+			}
 		);
 	}
 
