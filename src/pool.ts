@@ -6,11 +6,14 @@ export class WebSocketPool {
 	private relays: Map<string, RelayConn> = new Map();
 	private eventListeners: Map<string, EventListenerConn> = new Map();
 	private loaded = false;
+	private static readonly PING_INTERVAL_MS = 30_000;
+	private static readonly PING_TIMEOUT_MS = 60_000;
 
 	constructor(
 		private ctx: DurableObjectState,
 		private env: Env
 	) {
+		// Auto-respond "pong" to client-sent "ping" (works during hibernation)
 		this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 	}
 
@@ -64,6 +67,63 @@ export class WebSocketPool {
 	private generateId(prefix: string): string {
 		const rand = Math.random().toString(36).slice(2, 8);
 		return `${prefix}-${Date.now().toString(36)}-${rand}`;
+	}
+
+	// ── Alarm-based server→agent ping ──────────────────────────────
+
+	private async scheduleNextPing(): Promise<void> {
+		const existing = await this.ctx.storage.getAlarm();
+		if (!existing) {
+			await this.ctx.storage.setAlarm(Date.now() + WebSocketPool.PING_INTERVAL_MS);
+		}
+	}
+
+	async alarm(): Promise<void> {
+		await this.ensureLoaded();
+
+		const now = Date.now();
+		const sockets = this.ctx.getWebSockets();
+
+		for (const ws of sockets) {
+			const tags = this.ctx.getTags(ws);
+			if (!tags || tags.length < 2) continue;
+			const [type, id] = tags;
+
+			// Check last auto-response timestamp (last time client sent "ping" and got "pong")
+			const lastResponse = ws.getLastAutoResponseTimestamp();
+			if (lastResponse && now - lastResponse.getTime() > WebSocketPool.PING_TIMEOUT_MS) {
+				// Client hasn't pinged in too long — consider dead
+				if (type === "agent") {
+					await this.onAgentDisconnect(id);
+				} else if (type === "relay") {
+					await this.onRelayDisconnect(id);
+				} else if (type === "listener") {
+					this.eventListeners.delete(id);
+					await this.ctx.storage.delete(`listener:${id}`);
+					try { ws.close(1000, "ping timeout"); } catch {}
+				}
+				continue;
+			}
+
+			// Send server→client ping
+			try {
+				ws.send("ping");
+			} catch {
+				if (type === "agent") {
+					await this.onAgentDisconnect(id);
+				} else if (type === "relay") {
+					await this.onRelayDisconnect(id);
+				} else if (type === "listener") {
+					this.eventListeners.delete(id);
+					await this.ctx.storage.delete(`listener:${id}`);
+				}
+			}
+		}
+
+		// Re-schedule if there are still active connections
+		if (this.agents.size > 0 || this.relays.size > 0 || this.eventListeners.size > 0) {
+			await this.ctx.storage.setAlarm(now + WebSocketPool.PING_INTERVAL_MS);
+		}
 	}
 
 	// ── Hibernation WebSocket handlers ──────────────────────────────
@@ -348,6 +408,8 @@ export class WebSocketPool {
 		this.eventListeners.set(id, conn);
 		await this.ctx.storage.put(`listener:${id}`, { connectedAt: conn.connectedAt, info });
 
+		await this.scheduleNextPing();
+
 		// Send current agents snapshot
 		trySend(server, {
 			type: "agents",
@@ -417,6 +479,7 @@ export class WebSocketPool {
 		});
 
 		this.broadcastEvent({ type: "agent_connected", agent: agentStatus(conn) });
+		await this.scheduleNextPing();
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
@@ -507,6 +570,7 @@ export class WebSocketPool {
 		]);
 
 		this.broadcastEvent({ type: "agent_relayed", agentId, relayId });
+		await this.scheduleNextPing();
 
 		return new Response(null, { status: 101, webSocket: ws });
 	}
