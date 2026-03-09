@@ -4,9 +4,9 @@ compatibility_date = "2025-03-01"
 
 [durable_objects]
 bindings = [
-  { name = "WS_POOL", class_name = "WebSocketPool" }
+  { name = "RELAY_HUB", class_name = "RelayHub" }
 ]
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["WebSocketPool"]
+new_sqlite_classes = ["RelayHub"]

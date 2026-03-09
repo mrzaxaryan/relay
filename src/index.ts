@@ -3,15 +3,15 @@
 //
 // Endpoints:
 //   /             — API documentation (JSON)
-//   /health       — Live status + connection data (JSON)
-//   /ws           — Agent WebSocket connections
-//   /relay/:id    — Relay WebSocket (1:1 exclusive coupling to an agent)
+//   /status       — Live status + connection data (JSON)
+//   /agent        — Agent WebSocket connections
+//   /relay/:id    — Relay WebSocket (1:1 exclusive pairing to an agent)
 //   /events       — Live WebSocket feed of agent connect/disconnect events
 
 import type { Env } from "./types";
 import { corsHeaders } from "./utils";
 
-export { WebSocketPool } from "./pool";
+export { RelayHub } from "./hub";
 export type { Env } from "./types";
 
 export default {
@@ -20,8 +20,8 @@ export default {
 			return new Response(null, { status: 204, headers: corsHeaders() });
 		}
 
-		const id = env.WS_POOL.idFromName("global");
-		const stub = env.WS_POOL.get(id);
+		const id = env.RELAY_HUB.idFromName("global");
+		const stub = env.RELAY_HUB.get(id);
 		return stub.fetch(request);
 	},
 };

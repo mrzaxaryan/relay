@@ -1,8 +1,8 @@
 export interface Env {
-	WS_POOL: DurableObjectNamespace;
+	RELAY_HUB: DurableObjectNamespace;
 }
 
-export interface AgentInfo {
+export interface AgentMetadata {
 	ip: string;
 	country: string;
 	city: string;
@@ -15,33 +15,33 @@ export interface AgentInfo {
 	asn: number;
 	asOrganization: string;
 	userAgent: string;
-	protocol: string;
+	requestPriority: string;
 	tlsVersion: string;
 	httpVersion: string;
 }
 
-export interface AgentConn {
+export interface AgentConnection {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	relayId: string | null;
-	info: AgentInfo;
-	messageCount: number;
+	pairedRelayId: string | null;
+	metadata: AgentMetadata;
+	messagesForwarded: number;
 	lastActiveAt: number;
 }
 
-export interface RelayConn {
+export interface RelayConnection {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	agentId: string;
+	pairedAgentId: string;
 }
 
-export interface EventListenerConn {
+export interface EventListenerConnection {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	info: {
+	metadata: {
 		ip: string;
 		country: string;
 		city: string;

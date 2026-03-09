@@ -1,64 +1,64 @@
-import type { Env, AgentInfo, AgentConn, RelayConn, EventListenerConn } from "./types";
-import { corsHeaders, jsonResponse, agentStatus, trySend } from "./utils";
+import type { Env, AgentMetadata, AgentConnection, RelayConnection, EventListenerConnection } from "./types";
+import { corsHeaders, jsonResponse, toAgentStatus, safeSend } from "./utils";
 
-export class WebSocketPool {
-	private agents: Map<string, AgentConn> = new Map();
-	private relays: Map<string, RelayConn> = new Map();
-	private eventListeners: Map<string, EventListenerConn> = new Map();
-	private loaded = false;
-	private static readonly PING_INTERVAL_MS = 30_000;
-	private static readonly PING_TIMEOUT_MS = 60_000;
+export class RelayHub {
+	private agents: Map<string, AgentConnection> = new Map();
+	private relays: Map<string, RelayConnection> = new Map();
+	private eventListeners: Map<string, EventListenerConnection> = new Map();
+	private hydrated = false;
+	private static readonly HEARTBEAT_INTERVAL_MS = 30_000;
+	private static readonly HEARTBEAT_TIMEOUT_MS = 60_000;
 
 	constructor(
-		private ctx: DurableObjectState,
+		private state: DurableObjectState,
 		private env: Env
 	) {
 		// Auto-respond "pong" to client-sent "ping" (works during hibernation)
-		this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+		this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 	}
 
 	// ── State hydration (survives hibernation) ─────────────────────
 
-	private async ensureLoaded(): Promise<void> {
-		if (this.loaded) return;
-		this.loaded = true;
+	private async hydrateIfNeeded(): Promise<void> {
+		if (this.hydrated) return;
+		this.hydrated = true;
 
-		const stored = await this.ctx.storage.list();
-		const sockets = this.ctx.getWebSockets();
+		const stored = await this.state.storage.list();
+		const sockets = this.state.getWebSockets();
 
 		for (const ws of sockets) {
-			const tags = this.ctx.getTags(ws);
+			const tags = this.state.getTags(ws);
 			if (!tags || tags.length < 2) continue;
 			const [type, id] = tags;
 
 			if (type === "agent") {
 				const meta = stored.get(`agent:${id}`) as
-					| { connectedAt: number; relayId: string | null; info: AgentInfo }
+					| { connectedAt: number; pairedRelayId: string | null; metadata: AgentMetadata }
 					| undefined;
 				if (meta) {
 					this.agents.set(id, {
 						id,
 						ws,
 						connectedAt: meta.connectedAt,
-						relayId: meta.relayId,
-						info: meta.info,
-						messageCount: 0,
+						pairedRelayId: meta.pairedRelayId,
+						metadata: meta.metadata,
+						messagesForwarded: 0,
 						lastActiveAt: meta.connectedAt,
 					});
 				}
 			} else if (type === "relay") {
 				const meta = stored.get(`relay:${id}`) as
-					| { connectedAt: number; agentId: string }
+					| { connectedAt: number; pairedAgentId: string }
 					| undefined;
 				if (meta) {
-					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, agentId: meta.agentId });
+					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, pairedAgentId: meta.pairedAgentId });
 				}
 			} else if (type === "listener") {
 				const meta = stored.get(`listener:${id}`) as
-					| { connectedAt: number; info: { ip: string; country: string; city: string; userAgent: string } }
+					| { connectedAt: number; metadata: { ip: string; country: string; city: string; userAgent: string } }
 					| undefined;
 				if (meta) {
-					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, info: meta.info });
+					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, metadata: meta.metadata });
 				}
 			}
 		}
@@ -69,29 +69,29 @@ export class WebSocketPool {
 		return `${prefix}-${Date.now().toString(36)}-${rand}`;
 	}
 
-	// ── Alarm-based server→agent ping ──────────────────────────────
+	// ── Alarm-based server→agent heartbeat ─────────────────────────
 
-	private async scheduleNextPing(): Promise<void> {
-		const existing = await this.ctx.storage.getAlarm();
+	private async scheduleNextHeartbeat(): Promise<void> {
+		const existing = await this.state.storage.getAlarm();
 		if (!existing) {
-			await this.ctx.storage.setAlarm(Date.now() + WebSocketPool.PING_INTERVAL_MS);
+			await this.state.storage.setAlarm(Date.now() + RelayHub.HEARTBEAT_INTERVAL_MS);
 		}
 	}
 
 	async alarm(): Promise<void> {
-		await this.ensureLoaded();
+		await this.hydrateIfNeeded();
 
 		const now = Date.now();
-		const sockets = this.ctx.getWebSockets();
+		const sockets = this.state.getWebSockets();
 
 		for (const ws of sockets) {
-			const tags = this.ctx.getTags(ws);
+			const tags = this.state.getTags(ws);
 			if (!tags || tags.length < 2) continue;
 			const [type, id] = tags;
 
 			// Check last auto-response timestamp (last time client sent "ping" and got "pong")
 			const lastResponse = ws.getLastAutoResponseTimestamp();
-			if (lastResponse && now - lastResponse.getTime() > WebSocketPool.PING_TIMEOUT_MS) {
+			if (lastResponse && now - lastResponse.getTime() > RelayHub.HEARTBEAT_TIMEOUT_MS) {
 				// Client hasn't pinged in too long — consider dead
 				if (type === "agent") {
 					await this.onAgentDisconnect(id);
@@ -99,8 +99,8 @@ export class WebSocketPool {
 					await this.onRelayDisconnect(id);
 				} else if (type === "listener") {
 					this.eventListeners.delete(id);
-					await this.ctx.storage.delete(`listener:${id}`);
-					try { ws.close(1000, "ping timeout"); } catch {}
+					await this.state.storage.delete(`listener:${id}`);
+					try { ws.close(1000, "heartbeat timeout"); } catch {}
 				}
 				continue;
 			}
@@ -115,22 +115,22 @@ export class WebSocketPool {
 					await this.onRelayDisconnect(id);
 				} else if (type === "listener") {
 					this.eventListeners.delete(id);
-					await this.ctx.storage.delete(`listener:${id}`);
+					await this.state.storage.delete(`listener:${id}`);
 				}
 			}
 		}
 
 		// Re-schedule if there are still active connections
 		if (this.agents.size > 0 || this.relays.size > 0 || this.eventListeners.size > 0) {
-			await this.ctx.storage.setAlarm(now + WebSocketPool.PING_INTERVAL_MS);
+			await this.state.storage.setAlarm(now + RelayHub.HEARTBEAT_INTERVAL_MS);
 		}
 	}
 
 	// ── Hibernation WebSocket handlers ──────────────────────────────
 
 	async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
-		await this.ensureLoaded();
-		const [type, id] = (this.ctx.getTags(ws) ?? []);
+		await this.hydrateIfNeeded();
+		const [type, id] = (this.state.getTags(ws) ?? []);
 
 		if (type === "agent") {
 			this.onAgentMessage(id, data);
@@ -141,8 +141,8 @@ export class WebSocketPool {
 	}
 
 	async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
-		await this.ensureLoaded();
-		const [type, id] = (this.ctx.getTags(ws) ?? []);
+		await this.hydrateIfNeeded();
+		const [type, id] = (this.state.getTags(ws) ?? []);
 
 		if (type === "agent") {
 			await this.onAgentDisconnect(id);
@@ -150,13 +150,13 @@ export class WebSocketPool {
 			await this.onRelayDisconnect(id);
 		} else if (type === "listener") {
 			this.eventListeners.delete(id);
-			await this.ctx.storage.delete(`listener:${id}`);
+			await this.state.storage.delete(`listener:${id}`);
 		}
 	}
 
 	async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
-		await this.ensureLoaded();
-		const [type, id] = (this.ctx.getTags(ws) ?? []);
+		await this.hydrateIfNeeded();
+		const [type, id] = (this.state.getTags(ws) ?? []);
 
 		if (type === "agent") {
 			await this.onAgentDisconnect(id);
@@ -164,25 +164,25 @@ export class WebSocketPool {
 			await this.onRelayDisconnect(id);
 		} else if (type === "listener") {
 			this.eventListeners.delete(id);
-			await this.ctx.storage.delete(`listener:${id}`);
+			await this.state.storage.delete(`listener:${id}`);
 		}
 	}
 
 	// ── HTTP routing ────────────────────────────────────────────────
 
 	async fetch(request: Request): Promise<Response> {
-		await this.ensureLoaded();
+		await this.hydrateIfNeeded();
 		const url = new URL(request.url);
 
 		if (url.pathname === "/") {
-			return this.handleDocs(url);
+			return this.serveDocs(url);
 		}
 
-		if (url.pathname === "/health") {
+		if (url.pathname === "/status") {
 			return this.handleStatus();
 		}
 
-		if (url.pathname === "/ws") {
+		if (url.pathname === "/agent") {
 			return this.handleAgentUpgrade(request);
 		}
 
@@ -200,7 +200,7 @@ export class WebSocketPool {
 
 	// ── API Documentation ───────────────────────────────────────────
 
-	private handleDocs(url: URL): Response {
+	private serveDocs(url: URL): Response {
 		const base = `${url.protocol}//${url.host}`;
 
 		const docs = {
@@ -221,33 +221,33 @@ export class WebSocketPool {
 				},
 				{
 					method: "GET",
-					path: "/health",
-					url: `${base}/health`,
+					path: "/status",
+					url: `${base}/status`,
 					description: "Live status — connected agents, relays, and event listeners with full connection details",
-					returns: "HealthStatus",
+					returns: "StatusResponse",
 				},
 				{
 					method: "WS",
-					path: "/ws",
-					url: `${base}/ws`,
+					path: "/agent",
+					url: `${base}/agent`,
 					description: "Agent WebSocket connection. Server assigns an ID and broadcasts agent_connected to event listeners.",
 					messages: {
-						incoming: "any (forwarded to coupled relay)",
-						outgoing: "any (forwarded from coupled relay)",
+						incoming: "any (forwarded to paired relay)",
+						outgoing: "any (forwarded from paired relay)",
 					},
 				},
 				{
 					method: "WS",
 					path: "/relay/:agentId",
 					url: `${base}/relay/{agentId}`,
-					description: "Relay WebSocket — 1:1 exclusive coupling to an agent. Returns 404 if agent not found, 409 if already relayed.",
+					description: "Relay WebSocket — 1:1 exclusive pairing to an agent. Returns 404 if agent not found, 409 if already paired.",
 					messages: {
-						incoming: "any (forwarded to coupled agent)",
-						outgoing: "any (forwarded from coupled agent)",
+						incoming: "any (forwarded to paired agent)",
+						outgoing: "any (forwarded from paired agent)",
 					},
 					errors: {
 						404: "{ error: 'agent_not_found', agentId }",
-						409: "{ error: 'agent_already_relayed', agentId, relayId }",
+						409: "{ error: 'agent_already_paired', agentId, pairedRelayId }",
 					},
 				},
 				{
@@ -260,14 +260,14 @@ export class WebSocketPool {
 						events: [
 							"{ type: 'agent_connected', agent: AgentStatus }",
 							"{ type: 'agent_disconnected', agentId: string }",
-							"{ type: 'agent_relayed', agentId: string, relayId: string }",
-							"{ type: 'agent_unrelayed', agentId: string, relayId: string }",
+							"{ type: 'agent_paired', agentId: string, relayId: string }",
+							"{ type: 'agent_unpaired', agentId: string, relayId: string }",
 						],
 					},
 				},
 			],
 			types: {
-				AgentInfo: {
+				AgentMetadata: {
 					description: "Connection metadata collected from Cloudflare request",
 					fields: {
 						ip: "string",
@@ -282,33 +282,33 @@ export class WebSocketPool {
 						asn: "number",
 						asOrganization: "string",
 						userAgent: "string",
-						protocol: "string",
+						requestPriority: "string",
 						tlsVersion: "string",
 						httpVersion: "string",
 					},
 				},
 				AgentStatus: {
-					description: "Agent connection state (returned in /health and /events)",
+					description: "Agent connection state (returned in /status and /events)",
 					fields: {
 						id: "string",
 						connectedAt: "number (unix ms)",
-						relayed: "boolean",
-						relayId: "string | null",
-						messageCount: "number",
+						paired: "boolean",
+						pairedRelayId: "string | null",
+						messagesForwarded: "number",
 						lastActiveAt: "number (unix ms)",
-						"...AgentInfo": "spread",
+						"...AgentMetadata": "spread",
 					},
 				},
 				RelayStatus: {
-					description: "Relay connection state (returned in /health)",
+					description: "Relay connection state (returned in /status)",
 					fields: {
 						id: "string",
 						connectedAt: "number (unix ms)",
-						agentId: "string",
+						pairedAgentId: "string",
 					},
 				},
 				EventListenerStatus: {
-					description: "Event listener connection state (returned in /health)",
+					description: "Event listener connection state (returned in /status)",
 					fields: {
 						id: "string",
 						connectedAt: "number (unix ms)",
@@ -318,8 +318,8 @@ export class WebSocketPool {
 						userAgent: "string",
 					},
 				},
-				HealthStatus: {
-					description: "Response from GET /health",
+				StatusResponse: {
+					description: "Response from GET /status",
 					fields: {
 						agents: "{ count: number, connections: AgentStatus[] }",
 						relays: "{ count: number, connections: RelayStatus[] }",
@@ -330,20 +330,20 @@ export class WebSocketPool {
 					description: "WebSocket events sent to /events listeners",
 					types: {
 						agent_connected: {
-							description: "Fired when a new agent connects to /ws",
+							description: "Fired when a new agent connects to /agent",
 							fields: { type: "'agent_connected'", agent: "AgentStatus" },
 						},
 						agent_disconnected: {
 							description: "Fired when an agent disconnects",
 							fields: { type: "'agent_disconnected'", agentId: "string" },
 						},
-						agent_relayed: {
-							description: "Fired when a relay couples to an agent via /relay/:agentId",
-							fields: { type: "'agent_relayed'", agentId: "string", relayId: "string" },
+						agent_paired: {
+							description: "Fired when a relay pairs with an agent via /relay/:agentId",
+							fields: { type: "'agent_paired'", agentId: "string", relayId: "string" },
 						},
-						agent_unrelayed: {
+						agent_unpaired: {
 							description: "Fired when a relay disconnects from an agent",
-							fields: { type: "'agent_unrelayed'", agentId: "string", relayId: "string" },
+							fields: { type: "'agent_unpaired'", agentId: "string", relayId: "string" },
 						},
 					},
 				},
@@ -356,12 +356,12 @@ export class WebSocketPool {
 	// ── Status endpoint ──────────────────────────────────────────────
 
 	private handleStatus(): Response {
-		const agents = Array.from(this.agents.values()).map(agentStatus);
+		const agents = Array.from(this.agents.values()).map(toAgentStatus);
 
 		const relays = Array.from(this.relays.values()).map((r) => ({
 			id: r.id,
 			connectedAt: r.connectedAt,
-			agentId: r.agentId,
+			pairedAgentId: r.pairedAgentId,
 		}));
 
 		return jsonResponse({
@@ -372,7 +372,7 @@ export class WebSocketPool {
 				connections: Array.from(this.eventListeners.values()).map((e) => ({
 					id: e.id,
 					connectedAt: e.connectedAt,
-					...e.info,
+					...e.metadata,
 				})),
 			},
 		});
@@ -391,29 +391,29 @@ export class WebSocketPool {
 
 		const id = this.generateId("listener");
 		const cf = (request as any).cf || {};
-		const info = {
+		const metadata = {
 			ip: request.headers.get("CF-Connecting-IP") || "",
 			country: cf.country || "",
 			city: cf.city || "",
 			userAgent: request.headers.get("User-Agent") || "",
 		};
-		const conn: EventListenerConn = {
+		const conn: EventListenerConnection = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
-			info,
+			metadata,
 		};
 
-		this.ctx.acceptWebSocket(server, ["listener", id]);
+		this.state.acceptWebSocket(server, ["listener", id]);
 		this.eventListeners.set(id, conn);
-		await this.ctx.storage.put(`listener:${id}`, { connectedAt: conn.connectedAt, info });
+		await this.state.storage.put(`listener:${id}`, { connectedAt: conn.connectedAt, metadata });
 
-		await this.scheduleNextPing();
+		await this.scheduleNextHeartbeat();
 
 		// Send current agents snapshot
-		trySend(server, {
+		safeSend(server, {
 			type: "agents",
-			agents: Array.from(this.agents.values()).map(agentStatus),
+			agents: Array.from(this.agents.values()).map(toAgentStatus),
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -443,7 +443,7 @@ export class WebSocketPool {
 
 		const id = this.generateId("agent");
 		const cf = (request as any).cf || {};
-		const info: AgentInfo = {
+		const metadata: AgentMetadata = {
 			ip: request.headers.get("CF-Connecting-IP") || "",
 			country: cf.country || "",
 			city: cf.city || "",
@@ -456,30 +456,30 @@ export class WebSocketPool {
 			asn: cf.asn || 0,
 			asOrganization: cf.asOrganization || "",
 			userAgent: request.headers.get("User-Agent") || "",
-			protocol: cf.requestPriority || "",
+			requestPriority: cf.requestPriority || "",
 			tlsVersion: cf.tlsVersion || "",
 			httpVersion: cf.httpProtocol || "",
 		};
-		const conn: AgentConn = {
+		const conn: AgentConnection = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
-			relayId: null,
-			info,
-			messageCount: 0,
+			pairedRelayId: null,
+			metadata,
+			messagesForwarded: 0,
 			lastActiveAt: Date.now(),
 		};
 
-		this.ctx.acceptWebSocket(server, ["agent", id]);
+		this.state.acceptWebSocket(server, ["agent", id]);
 		this.agents.set(id, conn);
-		await this.ctx.storage.put(`agent:${id}`, {
+		await this.state.storage.put(`agent:${id}`, {
 			connectedAt: conn.connectedAt,
-			relayId: null,
-			info,
+			pairedRelayId: null,
+			metadata,
 		});
 
-		this.broadcastEvent({ type: "agent_connected", agent: agentStatus(conn) });
-		await this.scheduleNextPing();
+		this.broadcastEvent({ type: "agent_connected", agent: toAgentStatus(conn) });
+		await this.scheduleNextHeartbeat();
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
@@ -488,18 +488,18 @@ export class WebSocketPool {
 		const conn = this.agents.get(agentId);
 		if (!conn) return;
 
-		conn.messageCount++;
+		conn.messagesForwarded++;
 		conn.lastActiveAt = Date.now();
 
-		if (!conn.relayId) return;
+		if (!conn.pairedRelayId) return;
 
-		const relay = this.relays.get(conn.relayId);
+		const relay = this.relays.get(conn.pairedRelayId);
 		if (!relay) return;
 
 		try {
 			relay.ws.send(data);
 		} catch {
-			this.onRelayDisconnect(conn.relayId);
+			this.onRelayDisconnect(conn.pairedRelayId);
 		}
 	}
 
@@ -507,23 +507,23 @@ export class WebSocketPool {
 		const conn = this.agents.get(agentId);
 		if (!conn) return;
 
-		if (conn.relayId) {
-			const relay = this.relays.get(conn.relayId);
+		if (conn.pairedRelayId) {
+			const relay = this.relays.get(conn.pairedRelayId);
 			if (relay) {
 				try {
 					relay.ws.close(1000, "agent disconnected");
 				} catch {}
-				this.relays.delete(conn.relayId);
-				await this.ctx.storage.delete(`relay:${conn.relayId}`);
+				this.relays.delete(conn.pairedRelayId);
+				await this.state.storage.delete(`relay:${conn.pairedRelayId}`);
 			}
-			this.broadcastEvent({ type: "agent_unrelayed", agentId, relayId: conn.relayId });
+			this.broadcastEvent({ type: "agent_unpaired", agentId, relayId: conn.pairedRelayId });
 		}
 
 		try {
 			conn.ws.close(1000, "disconnect");
 		} catch {}
 		this.agents.delete(agentId);
-		await this.ctx.storage.delete(`agent:${agentId}`);
+		await this.state.storage.delete(`agent:${agentId}`);
 
 		this.broadcastEvent({ type: "agent_disconnected", agentId });
 	}
@@ -541,45 +541,45 @@ export class WebSocketPool {
 			return jsonResponse({ error: "agent_not_found", agentId }, 404);
 		}
 
-		if (agent.relayId) {
-			return jsonResponse({ error: "agent_already_relayed", agentId, relayId: agent.relayId }, 409);
+		if (agent.pairedRelayId) {
+			return jsonResponse({ error: "agent_already_paired", agentId, pairedRelayId: agent.pairedRelayId }, 409);
 		}
 
 		const pair = new WebSocketPair();
-		const [ws, server] = [pair[0], pair[1]];
+		const [client, server] = [pair[0], pair[1]];
 
 		const relayId = this.generateId("relay");
-		const conn: RelayConn = {
+		const conn: RelayConnection = {
 			id: relayId,
 			ws: server,
 			connectedAt: Date.now(),
-			agentId,
+			pairedAgentId: agentId,
 		};
 
-		this.ctx.acceptWebSocket(server, ["relay", relayId]);
+		this.state.acceptWebSocket(server, ["relay", relayId]);
 		this.relays.set(relayId, conn);
-		agent.relayId = relayId;
+		agent.pairedRelayId = relayId;
 
 		await Promise.all([
-			this.ctx.storage.put(`relay:${relayId}`, { connectedAt: conn.connectedAt, agentId }),
-			this.ctx.storage.put(`agent:${agent.id}`, {
+			this.state.storage.put(`relay:${relayId}`, { connectedAt: conn.connectedAt, pairedAgentId: agentId }),
+			this.state.storage.put(`agent:${agent.id}`, {
 				connectedAt: agent.connectedAt,
-				relayId,
-				info: agent.info,
+				pairedRelayId: relayId,
+				metadata: agent.metadata,
 			}),
 		]);
 
-		this.broadcastEvent({ type: "agent_relayed", agentId, relayId });
-		await this.scheduleNextPing();
+		this.broadcastEvent({ type: "agent_paired", agentId, relayId });
+		await this.scheduleNextHeartbeat();
 
-		return new Response(null, { status: 101, webSocket: ws });
+		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private onRelayMessage(relayId: string, data: string | ArrayBuffer): void {
 		const relay = this.relays.get(relayId);
 		if (!relay) return;
 
-		const agent = this.agents.get(relay.agentId);
+		const agent = this.agents.get(relay.pairedAgentId);
 		if (!agent) return;
 
 		try {
@@ -593,21 +593,21 @@ export class WebSocketPool {
 		const relay = this.relays.get(relayId);
 		if (!relay) return;
 
-		const agent = this.agents.get(relay.agentId);
+		const agent = this.agents.get(relay.pairedAgentId);
 		if (agent) {
-			agent.relayId = null;
-			await this.ctx.storage.put(`agent:${agent.id}`, {
+			agent.pairedRelayId = null;
+			await this.state.storage.put(`agent:${agent.id}`, {
 				connectedAt: agent.connectedAt,
-				relayId: null,
-				info: agent.info,
+				pairedRelayId: null,
+				metadata: agent.metadata,
 			});
-			this.broadcastEvent({ type: "agent_unrelayed", agentId: relay.agentId, relayId });
+			this.broadcastEvent({ type: "agent_unpaired", agentId: relay.pairedAgentId, relayId });
 		}
 
 		try {
 			relay.ws.close(1000, "disconnect");
 		} catch {}
 		this.relays.delete(relayId);
-		await this.ctx.storage.delete(`relay:${relayId}`);
+		await this.state.storage.delete(`relay:${relayId}`);
 	}
 }

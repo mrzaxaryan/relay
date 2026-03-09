@@ -1,7 +1,7 @@
 {
-  "name": "cloudflare-relay",
+  "name": "relay",
   "version": "1.0.0",
-  "description": "WebSocket relay server for PIR clients — Cloudflare Workers + Durable Objects",
+  "description": "WebSocket relay server for Position-Independent-Agent — Cloudflare Workers + Durable Objects",
   "private": true,
   "scripts": {
     "dev": "wrangler dev",

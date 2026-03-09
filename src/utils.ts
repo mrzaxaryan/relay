@@ -1,4 +1,4 @@
-import type { AgentConn } from "./types";
+import type { AgentConnection } from "./types";
 
 export function corsHeaders(): HeadersInit {
 	return {
@@ -15,19 +15,19 @@ export function jsonResponse(body: object, status: number = 200): Response {
 	});
 }
 
-export function agentStatus(a: AgentConn) {
+export function toAgentStatus(agent: AgentConnection) {
 	return {
-		id: a.id,
-		connectedAt: a.connectedAt,
-		relayed: a.relayId !== null,
-		relayId: a.relayId,
-		messageCount: a.messageCount,
-		lastActiveAt: a.lastActiveAt,
-		...a.info,
+		id: agent.id,
+		connectedAt: agent.connectedAt,
+		paired: agent.pairedRelayId !== null,
+		pairedRelayId: agent.pairedRelayId,
+		messagesForwarded: agent.messagesForwarded,
+		lastActiveAt: agent.lastActiveAt,
+		...agent.metadata,
 	};
 }
 
-export function trySend(ws: WebSocket, data: object | string): void {
+export function safeSend(ws: WebSocket, data: object | string): void {
 	try {
 		ws.send(typeof data === "string" ? data : JSON.stringify(data));
 	} catch {}
