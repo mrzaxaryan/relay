@@ -182,6 +182,10 @@ export class RelayHub {
 			return this.handleStatus();
 		}
 
+		if (url.pathname === "/disconnect-all-agents" && request.method === "POST") {
+			return this.handleDisconnectAllAgents();
+		}
+
 		if (url.pathname === "/agent") {
 			return this.handleAgentUpgrade(request);
 		}
@@ -225,6 +229,13 @@ export class RelayHub {
 					url: `${base}/status`,
 					description: "Live status — connected agents, relays, and event listeners with full connection details",
 					returns: "StatusResponse",
+				},
+				{
+					method: "POST",
+					path: "/disconnect-all-agents",
+					url: `${base}/disconnect-all-agents`,
+					description: "Disconnect all connected agents (and their paired relays). Returns the count and IDs of disconnected agents.",
+					returns: "{ disconnected: number, agentIds: string[] }",
 				},
 				{
 					method: "WS",
@@ -376,6 +387,16 @@ export class RelayHub {
 				})),
 			},
 		});
+	}
+
+	// ── Disconnect all agents ────────────────────────────────────────
+
+	private async handleDisconnectAllAgents(): Promise<Response> {
+		const agentIds = Array.from(this.agents.keys());
+		for (const id of agentIds) {
+			await this.onAgentDisconnect(id);
+		}
+		return jsonResponse({ disconnected: agentIds.length, agentIds });
 	}
 
 	// ── Events WebSocket (live agent feed) ───────────────────────────
