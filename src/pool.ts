@@ -10,7 +10,9 @@ export class WebSocketPool {
 	constructor(
 		private ctx: DurableObjectState,
 		private env: Env
-	) {}
+	) {
+		this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+	}
 
 	// ── State hydration (survives hibernation) ─────────────────────
 
