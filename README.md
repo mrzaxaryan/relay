@@ -1,6 +1,6 @@
 # relay
 
-WebSocket relay server for PIR clients — Cloudflare Workers + Durable Objects.
+WebSocket relay server for [Position-Independent-Agent](https://github.com/mrzaxaryan/Position-Independent-Agent) — Cloudflare Workers + Durable Objects.
 
 A single Durable Object (`WebSocketPool`) holds all connections in memory, pairing clients with relay connections 1:1.
 
