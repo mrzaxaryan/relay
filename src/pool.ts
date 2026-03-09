@@ -124,8 +124,6 @@ export class WebSocketPool {
 					messages: {
 						incoming: "any (forwarded to coupled agent)",
 						outgoing: "any (forwarded from coupled agent)",
-						onConnect: "{ type: 'coupled', relayId, agentId }",
-						onAgentDisconnect: "{ type: 'agent_disconnected', agentId }",
 					},
 					errors: {
 						404: "{ error: 'agent_not_found', agentId }",
@@ -428,7 +426,6 @@ export class WebSocketPool {
 		this.relays.set(relayId, conn);
 		agent.relayId = relayId;
 
-		trySend(server, { type: "coupled", relayId, agentId });
 		this.broadcastEvent({ type: "agent_relayed", agentId, relayId });
 
 		return new Response(null, { status: 101, webSocket: ws });
