@@ -125,14 +125,17 @@ export class WebSocketPool {
 
 		return new Response(
 			JSON.stringify({
+				service: "relay",
+				description: "WebSocket relay server for Position-Independent-Agent",
+				repo: "https://github.com/mrzaxaryan/relay",
 				endpoints: {
-					"/": "GET — This status page (JSON)",
-					"/ws": "WebSocket — Client connections. Receives { type: 'identity', id } on connect.",
-					"/relay/:clientId": "WebSocket — Relay connection, auto-couples 1:1 to the given client. Returns 404 if client not found, 409 if already relayed.",
+					"GET /": "Status and service info (this response)",
+					"WS /ws": "Client WebSocket — receives { type: 'identity', id } on connect",
+					"WS /relay/:clientId": "Relay WebSocket — 1:1 exclusive coupling to a client (404 if not found, 409 if already relayed)",
 				},
 				clients: { count: clients.length, connections: clients },
 				relays: { count: relays.length, connections: relays },
-			}),
+			}, null, 2),
 			{ headers: { "Content-Type": "application/json" } }
 		);
 	}
