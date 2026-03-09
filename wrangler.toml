@@ -1,4 +1,4 @@
-name = "cloudflare-relay"
+name = "relay"
 main = "src/index.ts"
 compatibility_date = "2025-03-01"
 
@@ -9,4 +9,4 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_classes = ["WebSocketPool"]
+new_sqlite_classes = ["WebSocketPool"]
