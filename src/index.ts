@@ -2,10 +2,11 @@
 // Cloudflare Workers + Durable Objects
 //
 // Endpoints:
-//   /ws         — Agent WebSocket connections
-//   /relay/:id  — Relay WebSocket (1:1 exclusive coupling to an agent)
-//   /events     — Live WebSocket feed of agent connect/disconnect events
-//   /           — Status info (JSON)
+//   /             — API documentation (JSON)
+//   /health       — Live status + connection data (JSON)
+//   /ws           — Agent WebSocket connections
+//   /relay/:id    — Relay WebSocket (1:1 exclusive coupling to an agent)
+//   /events       — Live WebSocket feed of agent connect/disconnect events
 
 export interface Env {
 	WS_POOL: DurableObjectNamespace;
@@ -21,6 +22,10 @@ export default {
 		const stub = env.WS_POOL.get(id);
 
 		if (url.pathname === "/") {
+			return stub.fetch(request);
+		}
+
+		if (url.pathname === "/health") {
 			return stub.fetch(request);
 		}
 
@@ -107,6 +112,10 @@ export class WebSocketPool {
 		const url = new URL(request.url);
 
 		if (url.pathname === "/") {
+			return this.handleDocs(url);
+		}
+
+		if (url.pathname === "/health") {
 			return this.handleStatus();
 		}
 
@@ -124,6 +133,145 @@ export class WebSocketPool {
 		}
 
 		return new Response("Not Found", { status: 404 });
+	}
+
+	// ── API Documentation ───────────────────────────────────────────
+
+	private handleDocs(url: URL): Response {
+		const base = `${url.protocol}//${url.host}`;
+
+		const docs = {
+			service: "relay",
+			description: "WebSocket relay server for Position-Independent-Agent and Command Center",
+			repos: {
+				relay: "https://github.com/mrzaxaryan/relay",
+				agent: "https://github.com/mrzaxaryan/Position-Independent-Agent",
+				cc: "https://github.com/mrzaxaryan/cc",
+			},
+			endpoints: [
+				{
+					method: "GET",
+					path: "/",
+					url: `${base}/`,
+					description: "API documentation (this response)",
+					returns: "ApiDocs",
+				},
+				{
+					method: "GET",
+					path: "/health",
+					url: `${base}/health`,
+					description: "Live status — connected agents, relays, and event listeners with full connection details",
+					returns: "HealthStatus",
+				},
+				{
+					method: "WS",
+					path: "/ws",
+					url: `${base}/ws`,
+					description: "Agent WebSocket connection. Server assigns an ID and broadcasts agent_connected to event listeners.",
+					messages: {
+						incoming: "any (forwarded to coupled relay)",
+						outgoing: "any (forwarded from coupled relay)",
+					},
+				},
+				{
+					method: "WS",
+					path: "/relay/:agentId",
+					url: `${base}/relay/{agentId}`,
+					description: "Relay WebSocket — 1:1 exclusive coupling to an agent. Returns 404 if agent not found, 409 if already relayed.",
+					messages: {
+						incoming: "any (forwarded to coupled agent)",
+						outgoing: "any (forwarded from coupled agent)",
+						onConnect: "{ type: 'coupled', relayId, agentId }",
+						onAgentDisconnect: "{ type: 'agent_disconnected', agentId }",
+					},
+					errors: {
+						404: "{ error: 'agent_not_found', agentId }",
+						409: "{ error: 'agent_already_relayed', agentId, relayId }",
+					},
+				},
+				{
+					method: "WS",
+					path: "/events",
+					url: `${base}/events`,
+					description: "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events",
+					messages: {
+						onConnect: "{ type: 'agents', agents: AgentStatus[] }",
+						events: [
+							"{ type: 'agent_connected', agent: AgentStatus }",
+							"{ type: 'agent_disconnected', agentId: string }",
+						],
+					},
+				},
+			],
+			types: {
+				AgentInfo: {
+					description: "Connection metadata collected from Cloudflare request",
+					fields: {
+						ip: "string",
+						country: "string",
+						city: "string",
+						region: "string",
+						continent: "string",
+						timezone: "string",
+						postalCode: "string",
+						latitude: "string",
+						longitude: "string",
+						asn: "number",
+						asOrganization: "string",
+						userAgent: "string",
+						protocol: "string",
+						tlsVersion: "string",
+						httpVersion: "string",
+					},
+				},
+				AgentStatus: {
+					description: "Agent connection state (returned in /health and /events)",
+					fields: {
+						id: "string",
+						connectedAt: "number (unix ms)",
+						relayed: "boolean",
+						relayId: "string | null",
+						messageCount: "number",
+						lastActiveAt: "number (unix ms)",
+						"...AgentInfo": "spread",
+					},
+				},
+				RelayStatus: {
+					description: "Relay connection state (returned in /health)",
+					fields: {
+						id: "string",
+						connectedAt: "number (unix ms)",
+						agentId: "string",
+					},
+				},
+				EventListenerStatus: {
+					description: "Event listener connection state (returned in /health)",
+					fields: {
+						id: "string",
+						connectedAt: "number (unix ms)",
+						ip: "string",
+						country: "string",
+						city: "string",
+						userAgent: "string",
+					},
+				},
+				HealthStatus: {
+					description: "Response from GET /health",
+					fields: {
+						agents: "{ count: number, connections: AgentStatus[] }",
+						relays: "{ count: number, connections: RelayStatus[] }",
+						eventListeners: "{ count: number, connections: EventListenerStatus[] }",
+					},
+				},
+			},
+		};
+
+		return new Response(JSON.stringify(docs, null, 2), {
+			headers: {
+				"Content-Type": "application/json",
+				"Access-Control-Allow-Origin": "*",
+			},
+		});
 	}
 
 	// ── Status endpoint ──────────────────────────────────────────────
@@ -147,19 +295,6 @@ export class WebSocketPool {
 
 		return new Response(
 			JSON.stringify({
-				service: "relay",
-				description: "WebSocket relay server for Position-Independent-Agent and Command Center",
-				repos: {
-					relay: "https://github.com/mrzaxaryan/relay",
-					agent: "https://github.com/mrzaxaryan/Position-Independent-Agent",
-					cc: "https://github.com/mrzaxaryan/cc",
-				},
-				endpoints: {
-					"GET /": "Status and service info (this response)",
-					"WS /ws": "Agent WebSocket connection",
-					"WS /relay/:agentId": "Relay WebSocket — 1:1 exclusive coupling to an agent (404 if not found, 409 if already relayed)",
-					"WS /events": "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events. Connected listeners shown in status.",
-				},
 				agents: { count: agents.length, connections: agents },
 				relays: { count: relays.length, connections: relays },
 				eventListeners: {
