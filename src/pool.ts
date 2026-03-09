@@ -8,9 +8,48 @@ export class WebSocketPool {
 	private idCounter: number = 0;
 
 	constructor(
-		private state: DurableObjectState,
+		private ctx: DurableObjectState,
 		private env: Env
 	) {}
+
+	// ── Hibernation WebSocket handlers ──────────────────────────────
+
+	async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
+		const [type, id] = (this.ctx.getTags(ws) ?? []);
+
+		if (type === "agent") {
+			this.onAgentMessage(id, data);
+		} else if (type === "relay") {
+			this.onRelayMessage(id, data);
+		}
+		// event listeners don't send meaningful messages
+	}
+
+	async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+		const [type, id] = (this.ctx.getTags(ws) ?? []);
+
+		if (type === "agent") {
+			this.onAgentDisconnect(id);
+		} else if (type === "relay") {
+			this.onRelayDisconnect(id);
+		} else if (type === "listener") {
+			this.eventListeners.delete(id);
+		}
+	}
+
+	async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+		const [type, id] = (this.ctx.getTags(ws) ?? []);
+
+		if (type === "agent") {
+			this.onAgentDisconnect(id);
+		} else if (type === "relay") {
+			this.onRelayDisconnect(id);
+		} else if (type === "listener") {
+			this.eventListeners.delete(id);
+		}
+	}
+
+	// ── HTTP routing ────────────────────────────────────────────────
 
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
@@ -223,21 +262,13 @@ export class WebSocketPool {
 			},
 		};
 
-		server.accept();
+		this.ctx.acceptWebSocket(server, ["listener", id]);
 		this.eventListeners.set(id, conn);
 
 		// Send current agents snapshot
 		trySend(server, {
 			type: "agents",
 			agents: Array.from(this.agents.values()).map(agentStatus),
-		});
-
-		server.addEventListener("close", () => {
-			this.eventListeners.delete(id);
-		});
-
-		server.addEventListener("error", () => {
-			this.eventListeners.delete(id);
 		});
 
 		return new Response(null, { status: 101, webSocket: client });
@@ -293,22 +324,10 @@ export class WebSocketPool {
 			lastActiveAt: Date.now(),
 		};
 
+		this.ctx.acceptWebSocket(server, ["agent", id]);
 		this.agents.set(id, conn);
-		server.accept();
 
 		this.broadcastEvent({ type: "agent_connected", agent: agentStatus(conn) });
-
-		server.addEventListener("message", (event) => {
-			this.onAgentMessage(id, event.data);
-		});
-
-		server.addEventListener("close", () => {
-			this.onAgentDisconnect(id);
-		});
-
-		server.addEventListener("error", () => {
-			this.onAgentDisconnect(id);
-		});
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
@@ -382,21 +401,11 @@ export class WebSocketPool {
 			agentId,
 		};
 
+		this.ctx.acceptWebSocket(server, ["relay", relayId]);
 		this.relays.set(relayId, conn);
 		agent.relayId = relayId;
-		server.accept();
 
-		server.addEventListener("message", (event) => {
-			this.onRelayMessage(relayId, event.data);
-		});
-
-		server.addEventListener("close", () => {
-			this.onRelayDisconnect(relayId);
-		});
-
-		server.addEventListener("error", () => {
-			this.onRelayDisconnect(relayId);
-		});
+		trySend(server, { type: "coupled", relayId, agentId });
 
 		return new Response(null, { status: 101, webSocket: ws });
 	}
