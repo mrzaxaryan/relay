@@ -1,20 +1,73 @@
-import type { Env, AgentConn, RelayConn, EventListenerConn } from "./types";
+import type { Env, AgentInfo, AgentConn, RelayConn, EventListenerConn } from "./types";
 import { corsHeaders, jsonResponse, agentStatus, trySend } from "./utils";
 
 export class WebSocketPool {
 	private agents: Map<string, AgentConn> = new Map();
 	private relays: Map<string, RelayConn> = new Map();
 	private eventListeners: Map<string, EventListenerConn> = new Map();
-	private idCounter: number = 0;
+	private loaded = false;
 
 	constructor(
 		private ctx: DurableObjectState,
 		private env: Env
 	) {}
 
+	// ── State hydration (survives hibernation) ─────────────────────
+
+	private async ensureLoaded(): Promise<void> {
+		if (this.loaded) return;
+		this.loaded = true;
+
+		const stored = await this.ctx.storage.list();
+		const sockets = this.ctx.getWebSockets();
+
+		for (const ws of sockets) {
+			const tags = this.ctx.getTags(ws);
+			if (!tags || tags.length < 2) continue;
+			const [type, id] = tags;
+
+			if (type === "agent") {
+				const meta = stored.get(`agent:${id}`) as
+					| { connectedAt: number; relayId: string | null; info: AgentInfo }
+					| undefined;
+				if (meta) {
+					this.agents.set(id, {
+						id,
+						ws,
+						connectedAt: meta.connectedAt,
+						relayId: meta.relayId,
+						info: meta.info,
+						messageCount: 0,
+						lastActiveAt: meta.connectedAt,
+					});
+				}
+			} else if (type === "relay") {
+				const meta = stored.get(`relay:${id}`) as
+					| { connectedAt: number; agentId: string }
+					| undefined;
+				if (meta) {
+					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, agentId: meta.agentId });
+				}
+			} else if (type === "listener") {
+				const meta = stored.get(`listener:${id}`) as
+					| { connectedAt: number; info: { ip: string; country: string; city: string; userAgent: string } }
+					| undefined;
+				if (meta) {
+					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, info: meta.info });
+				}
+			}
+		}
+	}
+
+	private generateId(prefix: string): string {
+		const rand = Math.random().toString(36).slice(2, 8);
+		return `${prefix}-${Date.now().toString(36)}-${rand}`;
+	}
+
 	// ── Hibernation WebSocket handlers ──────────────────────────────
 
 	async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
+		await this.ensureLoaded();
 		const [type, id] = (this.ctx.getTags(ws) ?? []);
 
 		if (type === "agent") {
@@ -26,32 +79,37 @@ export class WebSocketPool {
 	}
 
 	async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+		await this.ensureLoaded();
 		const [type, id] = (this.ctx.getTags(ws) ?? []);
 
 		if (type === "agent") {
-			this.onAgentDisconnect(id);
+			await this.onAgentDisconnect(id);
 		} else if (type === "relay") {
-			this.onRelayDisconnect(id);
+			await this.onRelayDisconnect(id);
 		} else if (type === "listener") {
 			this.eventListeners.delete(id);
+			await this.ctx.storage.delete(`listener:${id}`);
 		}
 	}
 
 	async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+		await this.ensureLoaded();
 		const [type, id] = (this.ctx.getTags(ws) ?? []);
 
 		if (type === "agent") {
-			this.onAgentDisconnect(id);
+			await this.onAgentDisconnect(id);
 		} else if (type === "relay") {
-			this.onRelayDisconnect(id);
+			await this.onRelayDisconnect(id);
 		} else if (type === "listener") {
 			this.eventListeners.delete(id);
+			await this.ctx.storage.delete(`listener:${id}`);
 		}
 	}
 
 	// ── HTTP routing ────────────────────────────────────────────────
 
 	async fetch(request: Request): Promise<Response> {
+		await this.ensureLoaded();
 		const url = new URL(request.url);
 
 		if (url.pathname === "/") {
@@ -260,7 +318,7 @@ export class WebSocketPool {
 
 	// ── Events WebSocket (live agent feed) ───────────────────────────
 
-	private handleEventsUpgrade(request: Request): Response {
+	private async handleEventsUpgrade(request: Request): Promise<Response> {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
@@ -269,22 +327,24 @@ export class WebSocketPool {
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 
-		const id = `listener-${++this.idCounter}-${Date.now().toString(36)}`;
+		const id = this.generateId("listener");
 		const cf = (request as any).cf || {};
+		const info = {
+			ip: request.headers.get("CF-Connecting-IP") || "",
+			country: cf.country || "",
+			city: cf.city || "",
+			userAgent: request.headers.get("User-Agent") || "",
+		};
 		const conn: EventListenerConn = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
-			info: {
-				ip: request.headers.get("CF-Connecting-IP") || "",
-				country: cf.country || "",
-				city: cf.city || "",
-				userAgent: request.headers.get("User-Agent") || "",
-			},
+			info,
 		};
 
 		this.ctx.acceptWebSocket(server, ["listener", id]);
 		this.eventListeners.set(id, conn);
+		await this.ctx.storage.put(`listener:${id}`, { connectedAt: conn.connectedAt, info });
 
 		// Send current agents snapshot
 		trySend(server, {
@@ -308,7 +368,7 @@ export class WebSocketPool {
 
 	// ── Agent WebSocket ─────────────────────────────────────────────
 
-	private handleAgentUpgrade(request: Request): Response {
+	private async handleAgentUpgrade(request: Request): Promise<Response> {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
@@ -317,36 +377,42 @@ export class WebSocketPool {
 		const pair = new WebSocketPair();
 		const [client, server] = [pair[0], pair[1]];
 
-		const id = `agent-${++this.idCounter}-${Date.now().toString(36)}`;
+		const id = this.generateId("agent");
 		const cf = (request as any).cf || {};
+		const info: AgentInfo = {
+			ip: request.headers.get("CF-Connecting-IP") || "",
+			country: cf.country || "",
+			city: cf.city || "",
+			region: cf.region || "",
+			continent: cf.continent || "",
+			timezone: cf.timezone || "",
+			postalCode: cf.postalCode || "",
+			latitude: cf.latitude || "",
+			longitude: cf.longitude || "",
+			asn: cf.asn || 0,
+			asOrganization: cf.asOrganization || "",
+			userAgent: request.headers.get("User-Agent") || "",
+			protocol: cf.requestPriority || "",
+			tlsVersion: cf.tlsVersion || "",
+			httpVersion: cf.httpProtocol || "",
+		};
 		const conn: AgentConn = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
 			relayId: null,
-			info: {
-				ip: request.headers.get("CF-Connecting-IP") || "",
-				country: cf.country || "",
-				city: cf.city || "",
-				region: cf.region || "",
-				continent: cf.continent || "",
-				timezone: cf.timezone || "",
-				postalCode: cf.postalCode || "",
-				latitude: cf.latitude || "",
-				longitude: cf.longitude || "",
-				asn: cf.asn || 0,
-				asOrganization: cf.asOrganization || "",
-				userAgent: request.headers.get("User-Agent") || "",
-				protocol: cf.requestPriority || "",
-				tlsVersion: cf.tlsVersion || "",
-				httpVersion: cf.httpProtocol || "",
-			},
+			info,
 			messageCount: 0,
 			lastActiveAt: Date.now(),
 		};
 
 		this.ctx.acceptWebSocket(server, ["agent", id]);
 		this.agents.set(id, conn);
+		await this.ctx.storage.put(`agent:${id}`, {
+			connectedAt: conn.connectedAt,
+			relayId: null,
+			info,
+		});
 
 		this.broadcastEvent({ type: "agent_connected", agent: agentStatus(conn) });
 
@@ -372,7 +438,7 @@ export class WebSocketPool {
 		}
 	}
 
-	private onAgentDisconnect(agentId: string): void {
+	private async onAgentDisconnect(agentId: string): Promise<void> {
 		const conn = this.agents.get(agentId);
 		if (!conn) return;
 
@@ -383,20 +449,23 @@ export class WebSocketPool {
 					relay.ws.close(1000, "agent disconnected");
 				} catch {}
 				this.relays.delete(conn.relayId);
+				await this.ctx.storage.delete(`relay:${conn.relayId}`);
 			}
+			this.broadcastEvent({ type: "agent_unrelayed", agentId, relayId: conn.relayId });
 		}
 
 		try {
 			conn.ws.close(1000, "disconnect");
 		} catch {}
 		this.agents.delete(agentId);
+		await this.ctx.storage.delete(`agent:${agentId}`);
 
 		this.broadcastEvent({ type: "agent_disconnected", agentId });
 	}
 
 	// ── Relay WebSocket ──────────────────────────────────────────────
 
-	private handleRelayUpgrade(request: Request, agentId: string): Response {
+	private async handleRelayUpgrade(request: Request, agentId: string): Promise<Response> {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426, headers: corsHeaders() });
@@ -414,7 +483,7 @@ export class WebSocketPool {
 		const pair = new WebSocketPair();
 		const [ws, server] = [pair[0], pair[1]];
 
-		const relayId = `relay-${++this.idCounter}-${Date.now().toString(36)}`;
+		const relayId = this.generateId("relay");
 		const conn: RelayConn = {
 			id: relayId,
 			ws: server,
@@ -425,6 +494,15 @@ export class WebSocketPool {
 		this.ctx.acceptWebSocket(server, ["relay", relayId]);
 		this.relays.set(relayId, conn);
 		agent.relayId = relayId;
+
+		await Promise.all([
+			this.ctx.storage.put(`relay:${relayId}`, { connectedAt: conn.connectedAt, agentId }),
+			this.ctx.storage.put(`agent:${agent.id}`, {
+				connectedAt: agent.connectedAt,
+				relayId,
+				info: agent.info,
+			}),
+		]);
 
 		this.broadcastEvent({ type: "agent_relayed", agentId, relayId });
 
@@ -445,13 +523,18 @@ export class WebSocketPool {
 		}
 	}
 
-	private onRelayDisconnect(relayId: string): void {
+	private async onRelayDisconnect(relayId: string): Promise<void> {
 		const relay = this.relays.get(relayId);
 		if (!relay) return;
 
 		const agent = this.agents.get(relay.agentId);
 		if (agent) {
 			agent.relayId = null;
+			await this.ctx.storage.put(`agent:${agent.id}`, {
+				connectedAt: agent.connectedAt,
+				relayId: null,
+				info: agent.info,
+			});
 			this.broadcastEvent({ type: "agent_unrelayed", agentId: relay.agentId, relayId });
 		}
 
@@ -459,5 +542,6 @@ export class WebSocketPool {
 			relay.ws.close(1000, "disconnect");
 		} catch {}
 		this.relays.delete(relayId);
+		await this.ctx.storage.delete(`relay:${relayId}`);
 	}
 }
