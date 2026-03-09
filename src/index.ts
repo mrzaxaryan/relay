@@ -179,8 +179,6 @@ export class WebSocketPool {
 		this.clients.set(id, conn);
 		server.accept();
 
-		server.send(JSON.stringify({ type: "identity", id }));
-
 		server.addEventListener("message", (event) => {
 			this.onClientMessage(id, event.data);
 		});
@@ -279,7 +277,6 @@ export class WebSocketPool {
 		server.accept();
 
 		server.send(JSON.stringify({ type: "coupled", relayId, clientId }));
-		trySend(client.ws, { type: "coupled", relayId });
 
 		server.addEventListener("message", (event) => {
 			this.onRelayMessage(relayId, event.data);
@@ -321,7 +318,6 @@ export class WebSocketPool {
 		const client = this.clients.get(relay.clientId);
 		if (client) {
 			client.relayId = null;
-			trySend(client.ws, { type: "decoupled", relayId });
 		}
 
 		try {
