@@ -2,36 +2,39 @@
 
 WebSocket relay server for PIR clients — Cloudflare Workers + Durable Objects.
 
-A single Durable Object (`WebSocketPool`) holds all connections in memory, acting as a middleman between remote clients and admin controllers.
+A single Durable Object (`WebSocketPool`) holds all connections in memory, pairing clients with relay connections 1:1.
 
 ## Endpoints
 
 | Path | Type | Description |
 |------|------|-------------|
-| `/wssClient` | WebSocket | PIR client connections |
-| `/wssAdmin` | WebSocket | Admin connections |
-| `/api/clients` | REST GET | List connected clients |
+| `/` | GET | JSON status — connected clients, active relays |
+| `/ws` | WebSocket | Client connections |
+| `/relay/:id` | WebSocket | Relay connection, auto-couples to client by ID (exclusive) |
 
 ## How It Works
 
-An admin can **couple** to a client, creating a 1:1 relay channel:
+1. A **client** connects to `/ws` and receives an `identity` message with its ID
+2. A **relay** connects to `/relay/:clientId` — this immediately couples it 1:1 with that client
+3. All messages flow transparently between the paired WebSockets (string and binary)
+4. If either side disconnects, the pairing is cleaned up and the other side is notified
 
-- Client messages are forwarded to the coupled admin (wrapped in `relay` / `relay_binary` envelopes)
-- Admin messages are forwarded raw to the coupled client (binary via base64)
-- Disconnection on either side cleans up the pairing and broadcasts an updated client list to all admins
+### Constraints
 
-### Admin Actions
+- Each client can have **at most one** relay at a time
+- Connecting to `/relay/:id` returns `404` if the client doesn't exist
+- Connecting to `/relay/:id` returns `409` if the client already has an active relay
 
-Send JSON with an `action` field:
+## Status Endpoint
 
-| Action | Description |
-|--------|-------------|
-| `couple` | Bind to a client (`{ action: "couple", clientId: "..." }`) |
-| `decouple` | Unbind from the current client |
-| `send` | Relay string data to the coupled client |
-| `send_binary` | Relay base64-encoded binary data to the coupled client |
-| `list` | Request the current client list |
-| `kick` | Disconnect a client by ID |
+`GET /` returns:
+
+```json
+{
+  "clients": { "count": 1, "connections": [{ "id": "...", "connectedAt": 0, "relayed": false }] },
+  "relays": { "count": 0, "connections": [] }
+}
+```
 
 ## Development
 

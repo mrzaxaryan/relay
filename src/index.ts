@@ -2,9 +2,9 @@
 // Cloudflare Workers + Durable Objects
 //
 // Endpoints:
-//   /wssClient   — PIR client WebSocket connections
-//   /wssAdmin    — Admin WebSocket connections
-//   /api/clients — REST: list connected clients
+//   /ws         — Client WebSocket connections
+//   /relay/:id  — Relay WebSocket (1:1 exclusive coupling to a client)
+//   /           — Status info (JSON)
 
 export interface Env {
 	WS_POOL: DurableObjectNamespace;
@@ -16,15 +16,19 @@ export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
 		const url = new URL(request.url);
 
-		// All WebSocket and API routes go to the single Durable Object instance
-		if (
-			url.pathname === "/wssClient" ||
-			url.pathname === "/wssAdmin" ||
-			url.pathname === "/api/clients"
-		) {
-			// Single global instance — all connections share one pool
-			const id = env.WS_POOL.idFromName("global");
-			const stub = env.WS_POOL.get(id);
+		const id = env.WS_POOL.idFromName("global");
+		const stub = env.WS_POOL.get(id);
+
+		if (url.pathname === "/") {
+			return stub.fetch(request);
+		}
+
+		if (url.pathname === "/ws") {
+			return stub.fetch(request);
+		}
+
+		const relayMatch = url.pathname.match(/^\/relay\/(.+)$/);
+		if (relayMatch) {
 			return stub.fetch(request);
 		}
 
@@ -38,22 +42,21 @@ interface ClientConn {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	label: string;
-	coupledAdminId: string | null;
+	relayId: string | null;
 }
 
-interface AdminConn {
+interface RelayConn {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	coupledClientId: string | null;
+	clientId: string;
 }
 
 // ─── Durable Object: WebSocketPool ────────────────────────────────────
 
 export class WebSocketPool {
 	private clients: Map<string, ClientConn> = new Map();
-	private admins: Map<string, AdminConn> = new Map();
+	private relays: Map<string, RelayConn> = new Map();
 	private idCounter: number = 0;
 
 	constructor(
@@ -64,36 +67,47 @@ export class WebSocketPool {
 	async fetch(request: Request): Promise<Response> {
 		const url = new URL(request.url);
 
-		if (url.pathname === "/api/clients") {
-			return this.handleApiClients();
+		if (url.pathname === "/") {
+			return this.handleStatus();
 		}
 
-		if (url.pathname === "/wssClient") {
+		if (url.pathname === "/ws") {
 			return this.handleClientUpgrade(request);
 		}
 
-		if (url.pathname === "/wssAdmin") {
-			return this.handleAdminUpgrade(request);
+		const relayMatch = url.pathname.match(/^\/relay\/(.+)$/);
+		if (relayMatch) {
+			return this.handleRelayUpgrade(request, relayMatch[1]);
 		}
 
 		return new Response("Not Found", { status: 404 });
 	}
 
-	// ── REST: list connected clients ──────────────────────────────────
+	// ── Status endpoint ──────────────────────────────────────────────
 
-	private handleApiClients(): Response {
-		const list = Array.from(this.clients.values()).map((c) => ({
+	private handleStatus(): Response {
+		const clients = Array.from(this.clients.values()).map((c) => ({
 			id: c.id,
-			label: c.label,
 			connectedAt: c.connectedAt,
-			coupled: c.coupledAdminId !== null,
+			relayed: c.relayId !== null,
 		}));
-		return new Response(JSON.stringify(list), {
-			headers: { "Content-Type": "application/json" },
-		});
+
+		const relays = Array.from(this.relays.values()).map((r) => ({
+			id: r.id,
+			connectedAt: r.connectedAt,
+			clientId: r.clientId,
+		}));
+
+		return new Response(
+			JSON.stringify({
+				clients: { count: clients.length, connections: clients },
+				relays: { count: relays.length, connections: relays },
+			}),
+			{ headers: { "Content-Type": "application/json" } }
+		);
 	}
 
-	// ── Client WebSocket ──────────────────────────────────────────────
+	// ── Client WebSocket ─────────────────────────────────────────────
 
 	private handleClientUpgrade(request: Request): Response {
 		const upgrade = request.headers.get("Upgrade");
@@ -109,14 +123,12 @@ export class WebSocketPool {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
-			label: id,
-			coupledAdminId: null,
+			relayId: null,
 		};
 
 		this.clients.set(id, conn);
 		server.accept();
 
-		// Send the client its assigned ID
 		server.send(JSON.stringify({ type: "identity", id }));
 
 		server.addEventListener("message", (event) => {
@@ -131,41 +143,24 @@ export class WebSocketPool {
 			this.onClientDisconnect(id);
 		});
 
-		// Broadcast updated client list to all admins
-		this.broadcastClientList();
-
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private onClientMessage(clientId: string, data: string | ArrayBuffer): void {
 		const conn = this.clients.get(clientId);
-		if (!conn || !conn.coupledAdminId) return;
+		if (!conn || !conn.relayId) return;
 
-		// Relay to coupled admin
-		const admin = this.admins.get(conn.coupledAdminId);
-		if (!admin) return;
+		const relay = this.relays.get(conn.relayId);
+		if (!relay) return;
 
 		try {
 			if (typeof data === "string") {
-				admin.ws.send(
-					JSON.stringify({
-						type: "relay",
-						from: clientId,
-						data,
-					})
-				);
+				relay.ws.send(data);
 			} else {
-				// Binary data — wrap with metadata header
-				admin.ws.send(
-					JSON.stringify({
-						type: "relay_binary",
-						from: clientId,
-						data: arrayBufferToBase64(data),
-					})
-				);
+				relay.ws.send(data);
 			}
 		} catch {
-			this.onAdminDisconnect(conn.coupledAdminId);
+			this.onRelayDisconnect(conn.relayId);
 		}
 	}
 
@@ -173,16 +168,14 @@ export class WebSocketPool {
 		const conn = this.clients.get(clientId);
 		if (!conn) return;
 
-		// Decouple if coupled
-		if (conn.coupledAdminId) {
-			const admin = this.admins.get(conn.coupledAdminId);
-			if (admin) {
-				admin.coupledClientId = null;
-				trySend(admin.ws, {
-					type: "decoupled",
-					reason: "client_disconnected",
-					clientId,
-				});
+		if (conn.relayId) {
+			const relay = this.relays.get(conn.relayId);
+			if (relay) {
+				trySend(relay.ws, { type: "client_disconnected", clientId });
+				try {
+					relay.ws.close(1000, "client disconnected");
+				} catch {}
+				this.relays.delete(conn.relayId);
 			}
 		}
 
@@ -190,215 +183,96 @@ export class WebSocketPool {
 			conn.ws.close(1000, "disconnect");
 		} catch {}
 		this.clients.delete(clientId);
-		this.broadcastClientList();
 	}
 
-	// ── Admin WebSocket ───────────────────────────────────────────────
+	// ── Relay WebSocket ──────────────────────────────────────────────
 
-	private handleAdminUpgrade(request: Request): Response {
+	private handleRelayUpgrade(request: Request, clientId: string): Response {
 		const upgrade = request.headers.get("Upgrade");
 		if (!upgrade || upgrade.toLowerCase() !== "websocket") {
 			return new Response("Expected WebSocket upgrade", { status: 426 });
 		}
 
-		const pair = new WebSocketPair();
-		const [client, server] = [pair[0], pair[1]];
+		const client = this.clients.get(clientId);
+		if (!client) {
+			return new Response(
+				JSON.stringify({ error: "client_not_found", clientId }),
+				{ status: 404, headers: { "Content-Type": "application/json" } }
+			);
+		}
 
-		const id = `admin-${++this.idCounter}-${Date.now().toString(36)}`;
-		const conn: AdminConn = {
-			id,
+		if (client.relayId) {
+			return new Response(
+				JSON.stringify({ error: "client_already_relayed", clientId, relayId: client.relayId }),
+				{ status: 409, headers: { "Content-Type": "application/json" } }
+			);
+		}
+
+		const pair = new WebSocketPair();
+		const [ws, server] = [pair[0], pair[1]];
+
+		const relayId = `relay-${++this.idCounter}-${Date.now().toString(36)}`;
+		const conn: RelayConn = {
+			id: relayId,
 			ws: server,
 			connectedAt: Date.now(),
-			coupledClientId: null,
+			clientId,
 		};
 
-		this.admins.set(id, conn);
+		this.relays.set(relayId, conn);
+		client.relayId = relayId;
 		server.accept();
 
-		// Send identity + current client list
-		server.send(JSON.stringify({ type: "identity", id }));
-		this.sendClientList(server);
+		server.send(JSON.stringify({ type: "coupled", relayId, clientId }));
+		trySend(client.ws, { type: "coupled", relayId });
 
 		server.addEventListener("message", (event) => {
-			if (typeof event.data === "string") {
-				this.onAdminMessage(id, event.data);
-			}
+			this.onRelayMessage(relayId, event.data);
 		});
 
 		server.addEventListener("close", () => {
-			this.onAdminDisconnect(id);
+			this.onRelayDisconnect(relayId);
 		});
 
 		server.addEventListener("error", () => {
-			this.onAdminDisconnect(id);
+			this.onRelayDisconnect(relayId);
 		});
 
-		return new Response(null, { status: 101, webSocket: client });
+		return new Response(null, { status: 101, webSocket: ws });
 	}
 
-	private onAdminMessage(adminId: string, raw: string): void {
-		let msg: any;
-		try {
-			msg = JSON.parse(raw);
-		} catch {
-			return;
-		}
+	private onRelayMessage(relayId: string, data: string | ArrayBuffer): void {
+		const relay = this.relays.get(relayId);
+		if (!relay) return;
 
-		const admin = this.admins.get(adminId);
-		if (!admin) return;
-
-		switch (msg.action) {
-			case "couple":
-				this.coupleAdminToClient(adminId, msg.clientId);
-				break;
-
-			case "decouple":
-				this.decoupleAdmin(adminId);
-				break;
-
-			case "send":
-				this.relayAdminToClient(adminId, msg.data, false);
-				break;
-
-			case "send_binary":
-				this.relayAdminToClient(adminId, msg.data, true);
-				break;
-
-			case "list":
-				this.sendClientList(admin.ws);
-				break;
-
-			case "kick":
-				this.kickClient(msg.clientId);
-				break;
-
-			default:
-				trySend(admin.ws, {
-					type: "error",
-					message: `Unknown action: ${msg.action}`,
-				});
-		}
-	}
-
-	private coupleAdminToClient(adminId: string, clientId: string): void {
-		const admin = this.admins.get(adminId);
-		const client = this.clients.get(clientId);
-
-		if (!admin) return;
-		if (!client) {
-			trySend(admin.ws, {
-				type: "error",
-				message: `Client ${clientId} not found`,
-			});
-			return;
-		}
-
-		// Decouple existing connections first
-		if (admin.coupledClientId) {
-			this.decoupleAdmin(adminId);
-		}
-		if (client.coupledAdminId) {
-			this.decoupleAdmin(client.coupledAdminId);
-		}
-
-		// Couple
-		admin.coupledClientId = clientId;
-		client.coupledAdminId = adminId;
-
-		trySend(admin.ws, { type: "coupled", clientId });
-		trySend(client.ws, JSON.stringify({ type: "coupled" }));
-
-		this.broadcastClientList();
-	}
-
-	private decoupleAdmin(adminId: string): void {
-		const admin = this.admins.get(adminId);
-		if (!admin || !admin.coupledClientId) return;
-
-		const client = this.clients.get(admin.coupledClientId);
-		const clientId = admin.coupledClientId;
-
-		admin.coupledClientId = null;
-		if (client) {
-			client.coupledAdminId = null;
-			trySend(client.ws, JSON.stringify({ type: "decoupled" }));
-		}
-
-		trySend(admin.ws, { type: "decoupled", reason: "admin_request", clientId });
-		this.broadcastClientList();
-	}
-
-	private relayAdminToClient(
-		adminId: string,
-		data: string,
-		isBinary: boolean
-	): void {
-		const admin = this.admins.get(adminId);
-		if (!admin || !admin.coupledClientId) {
-			if (admin) {
-				trySend(admin.ws, {
-					type: "error",
-					message: "Not coupled to any client",
-				});
-			}
-			return;
-		}
-
-		const client = this.clients.get(admin.coupledClientId);
+		const client = this.clients.get(relay.clientId);
 		if (!client) return;
 
 		try {
-			if (isBinary) {
-				client.ws.send(base64ToArrayBuffer(data));
+			if (typeof data === "string") {
+				client.ws.send(data);
 			} else {
 				client.ws.send(data);
 			}
 		} catch {
-			this.onClientDisconnect(admin.coupledClientId);
+			this.onClientDisconnect(relay.clientId);
 		}
 	}
 
-	private kickClient(clientId: string): void {
-		this.onClientDisconnect(clientId);
-	}
+	private onRelayDisconnect(relayId: string): void {
+		const relay = this.relays.get(relayId);
+		if (!relay) return;
 
-	private onAdminDisconnect(adminId: string): void {
-		const admin = this.admins.get(adminId);
-		if (!admin) return;
-
-		// Decouple if coupled
-		if (admin.coupledClientId) {
-			const client = this.clients.get(admin.coupledClientId);
-			if (client) {
-				client.coupledAdminId = null;
-				trySend(client.ws, JSON.stringify({ type: "decoupled" }));
-			}
+		const client = this.clients.get(relay.clientId);
+		if (client) {
+			client.relayId = null;
+			trySend(client.ws, { type: "decoupled", relayId });
 		}
 
 		try {
-			admin.ws.close(1000, "disconnect");
+			relay.ws.close(1000, "disconnect");
 		} catch {}
-		this.admins.delete(adminId);
-		this.broadcastClientList();
-	}
-
-	// ── Broadcast helpers ─────────────────────────────────────────────
-
-	private broadcastClientList(): void {
-		for (const admin of this.admins.values()) {
-			this.sendClientList(admin.ws);
-		}
-	}
-
-	private sendClientList(ws: WebSocket): void {
-		const list = Array.from(this.clients.values()).map((c) => ({
-			id: c.id,
-			label: c.label,
-			connectedAt: c.connectedAt,
-			coupled: c.coupledAdminId !== null,
-			coupledAdminId: c.coupledAdminId,
-		}));
-		trySend(ws, { type: "client_list", clients: list });
+		this.relays.delete(relayId);
 	}
 }
 
@@ -408,22 +282,4 @@ function trySend(ws: WebSocket, data: object | string): void {
 	try {
 		ws.send(typeof data === "string" ? data : JSON.stringify(data));
 	} catch {}
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-	const bytes = new Uint8Array(buffer);
-	let binary = "";
-	for (let i = 0; i < bytes.byteLength; i++) {
-		binary += String.fromCharCode(bytes[i]);
-	}
-	return btoa(binary);
-}
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-	const binary = atob(base64);
-	const bytes = new Uint8Array(binary.length);
-	for (let i = 0; i < binary.length; i++) {
-		bytes[i] = binary.charCodeAt(i);
-	}
-	return bytes.buffer;
 }
