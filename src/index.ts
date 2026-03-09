@@ -125,6 +125,11 @@ export class WebSocketPool {
 
 		return new Response(
 			JSON.stringify({
+				endpoints: {
+					"/": "GET — This status page (JSON)",
+					"/ws": "WebSocket — Client connections. Receives { type: 'identity', id } on connect.",
+					"/relay/:clientId": "WebSocket — Relay connection, auto-couples 1:1 to the given client. Returns 404 if client not found, 409 if already relayed.",
+				},
 				clients: { count: clients.length, connections: clients },
 				relays: { count: relays.length, connections: relays },
 			}),
