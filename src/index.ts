@@ -38,11 +38,32 @@ export default {
 
 // ─── Connection Types ─────────────────────────────────────────────────
 
+interface ClientInfo {
+	ip: string;
+	country: string;
+	city: string;
+	region: string;
+	continent: string;
+	timezone: string;
+	postalCode: string;
+	latitude: string;
+	longitude: string;
+	asn: number;
+	asOrganization: string;
+	userAgent: string;
+	protocol: string;
+	tlsVersion: string;
+	httpVersion: string;
+}
+
 interface ClientConn {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
 	relayId: string | null;
+	info: ClientInfo;
+	messageCount: number;
+	lastActiveAt: number;
 }
 
 interface RelayConn {
@@ -90,6 +111,10 @@ export class WebSocketPool {
 			id: c.id,
 			connectedAt: c.connectedAt,
 			relayed: c.relayId !== null,
+			relayId: c.relayId,
+			messageCount: c.messageCount,
+			lastActiveAt: c.lastActiveAt,
+			...c.info,
 		}));
 
 		const relays = Array.from(this.relays.values()).map((r) => ({
@@ -119,11 +144,31 @@ export class WebSocketPool {
 		const [client, server] = [pair[0], pair[1]];
 
 		const id = `client-${++this.idCounter}-${Date.now().toString(36)}`;
+		const cf = (request as any).cf || {};
 		const conn: ClientConn = {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
 			relayId: null,
+			info: {
+				ip: request.headers.get("CF-Connecting-IP") || "",
+				country: cf.country || "",
+				city: cf.city || "",
+				region: cf.region || "",
+				continent: cf.continent || "",
+				timezone: cf.timezone || "",
+				postalCode: cf.postalCode || "",
+				latitude: cf.latitude || "",
+				longitude: cf.longitude || "",
+				asn: cf.asn || 0,
+				asOrganization: cf.asOrganization || "",
+				userAgent: request.headers.get("User-Agent") || "",
+				protocol: cf.requestPriority || "",
+				tlsVersion: cf.tlsVersion || "",
+				httpVersion: cf.httpProtocol || "",
+			},
+			messageCount: 0,
+			lastActiveAt: Date.now(),
 		};
 
 		this.clients.set(id, conn);
@@ -148,7 +193,12 @@ export class WebSocketPool {
 
 	private onClientMessage(clientId: string, data: string | ArrayBuffer): void {
 		const conn = this.clients.get(clientId);
-		if (!conn || !conn.relayId) return;
+		if (!conn) return;
+
+		conn.messageCount++;
+		conn.lastActiveAt = Date.now();
+
+		if (!conn.relayId) return;
 
 		const relay = this.relays.get(conn.relayId);
 		if (!relay) return;
