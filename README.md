@@ -12,7 +12,7 @@ A single Durable Object (`WebSocketPool`) holds all connections in memory, pairi
 | `/health` | GET | Live status — connected agents, relays, event listeners |
 | `/ws` | WebSocket | Agent connections |
 | `/relay/:agentId` | WebSocket | Relay connection, auto-couples to agent by ID (exclusive) |
-| `/events` | WebSocket | Live feed of agent connect/disconnect events |
+| `/events` | WebSocket | Live feed of agent and relay events |
 
 ## How It Works
 
@@ -20,7 +20,7 @@ A single Durable Object (`WebSocketPool`) holds all connections in memory, pairi
 2. A **relay** connects to `/relay/:agentId` — this immediately couples it 1:1 with that agent and sends a `coupled` message
 3. All messages flow transparently between the paired WebSockets (string and binary)
 4. If either side disconnects, the pairing is cleaned up and the other side is notified
-5. **Event listeners** on `/events` receive a snapshot of all agents on connect, then live `agent_connected` / `agent_disconnected` events
+5. **Event listeners** on `/events` receive a snapshot of all agents on connect, then live events: `agent_connected`, `agent_disconnected`, `agent_relayed`, `agent_unrelayed`
 
 ### Constraints
 

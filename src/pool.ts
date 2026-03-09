@@ -136,12 +136,14 @@ export class WebSocketPool {
 					method: "WS",
 					path: "/events",
 					url: `${base}/events`,
-					description: "Live feed — sends all agents on connect, then agent_connected / agent_disconnected events",
+					description: "Live feed — sends all agents on connect, then real-time agent and relay events",
 					messages: {
 						onConnect: "{ type: 'agents', agents: AgentStatus[] }",
 						events: [
 							"{ type: 'agent_connected', agent: AgentStatus }",
 							"{ type: 'agent_disconnected', agentId: string }",
+							"{ type: 'agent_relayed', agentId: string, relayId: string }",
+							"{ type: 'agent_unrelayed', agentId: string, relayId: string }",
 						],
 					},
 				},
@@ -204,6 +206,27 @@ export class WebSocketPool {
 						agents: "{ count: number, connections: AgentStatus[] }",
 						relays: "{ count: number, connections: RelayStatus[] }",
 						eventListeners: "{ count: number, connections: EventListenerStatus[] }",
+					},
+				},
+				Events: {
+					description: "WebSocket events sent to /events listeners",
+					types: {
+						agent_connected: {
+							description: "Fired when a new agent connects to /ws",
+							fields: { type: "'agent_connected'", agent: "AgentStatus" },
+						},
+						agent_disconnected: {
+							description: "Fired when an agent disconnects",
+							fields: { type: "'agent_disconnected'", agentId: "string" },
+						},
+						agent_relayed: {
+							description: "Fired when a relay couples to an agent via /relay/:agentId",
+							fields: { type: "'agent_relayed'", agentId: "string", relayId: "string" },
+						},
+						agent_unrelayed: {
+							description: "Fired when a relay disconnects from an agent",
+							fields: { type: "'agent_unrelayed'", agentId: "string", relayId: "string" },
+						},
 					},
 				},
 			},
@@ -406,6 +429,7 @@ export class WebSocketPool {
 		agent.relayId = relayId;
 
 		trySend(server, { type: "coupled", relayId, agentId });
+		this.broadcastEvent({ type: "agent_relayed", agentId, relayId });
 
 		return new Response(null, { status: 101, webSocket: ws });
 	}
@@ -420,7 +444,7 @@ export class WebSocketPool {
 		try {
 			agent.ws.send(data);
 		} catch {
-			this.onAgentDisconnect(relay.agentId);
+			this.onRelayDisconnect(relayId);
 		}
 	}
 
@@ -431,6 +455,7 @@ export class WebSocketPool {
 		const agent = this.agents.get(relay.agentId);
 		if (agent) {
 			agent.relayId = null;
+			this.broadcastEvent({ type: "agent_unrelayed", agentId: relay.agentId, relayId });
 		}
 
 		try {
