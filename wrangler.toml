@@ -9,4 +9,8 @@ bindings = [
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["RelayHub"]
+new_sqlite_classes = ["WebSocketPool"]
+
+[[migrations]]
+tag = "v2"
+renamed_classes = [{from = "WebSocketPool", to = "RelayHub"}]
