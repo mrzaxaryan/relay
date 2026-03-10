@@ -1,5 +1,6 @@
 import type { Env, AgentMetadata, AgentConnection, RelayConnection, EventListenerConnection } from "./types";
 import { corsHeaders, jsonResponse, toAgentStatus, safeSend } from "./utils";
+import { buildDocsHtml } from "./docs";
 
 export class RelayHub {
 	private agents: Map<string, AgentConnection> = new Map();
@@ -202,155 +203,9 @@ export class RelayHub {
 
 	private serveDocs(url: URL): Response {
 		const base = `${url.protocol}//${url.host}`;
-
-		const docs = {
-			service: "relay",
-			description: "WebSocket relay server for Position-Independent-Agent and Command Center",
-			repos: {
-				relay: "https://github.com/mrzaxaryan/relay",
-				agent: "https://github.com/mrzaxaryan/Position-Independent-Agent",
-				cc: "https://github.com/mrzaxaryan/cc",
-			},
-			endpoints: [
-				{
-					method: "GET",
-					path: "/",
-					url: `${base}/`,
-					description: "API documentation (this response)",
-					returns: "ApiDocs",
-				},
-				{
-					method: "GET",
-					path: "/status",
-					url: `${base}/status`,
-					description: "Live status — connected agents, relays, and event listeners with full connection details",
-					returns: "StatusResponse",
-				},
-				{
-					method: "WS",
-					path: "/agent",
-					url: `${base}/agent`,
-					description: "Agent WebSocket connection. Server assigns an ID and broadcasts agent_connected to event listeners.",
-					messages: {
-						incoming: "any (forwarded to paired relay)",
-						outgoing: "any (forwarded from paired relay)",
-					},
-				},
-				{
-					method: "WS",
-					path: "/relay/:agentId",
-					url: `${base}/relay/{agentId}`,
-					description: "Relay WebSocket — 1:1 exclusive pairing to an agent. Returns 404 if agent not found, 409 if already paired.",
-					messages: {
-						incoming: "any (forwarded to paired agent)",
-						outgoing: "any (forwarded from paired agent)",
-					},
-					errors: {
-						404: "{ error: 'agent_not_found', agentId }",
-						409: "{ error: 'agent_already_paired', agentId, pairedRelayId }",
-					},
-				},
-				{
-					method: "WS",
-					path: "/events",
-					url: `${base}/events`,
-					description: "Live feed — sends all agents on connect, then real-time agent and relay events",
-					messages: {
-						onConnect: "{ type: 'agents', agents: AgentStatus[] }",
-						events: [
-							"{ type: 'agent_connected', agent: AgentStatus }",
-							"{ type: 'agent_disconnected', agentId: string }",
-							"{ type: 'agent_paired', agentId: string, relayId: string }",
-							"{ type: 'agent_unpaired', agentId: string, relayId: string }",
-						],
-					},
-				},
-			],
-			types: {
-				AgentMetadata: {
-					description: "Connection metadata collected from Cloudflare request",
-					fields: {
-						ip: "string",
-						country: "string",
-						city: "string",
-						region: "string",
-						continent: "string",
-						timezone: "string",
-						postalCode: "string",
-						latitude: "string",
-						longitude: "string",
-						asn: "number",
-						asOrganization: "string",
-						userAgent: "string",
-						requestPriority: "string",
-						tlsVersion: "string",
-						httpVersion: "string",
-					},
-				},
-				AgentStatus: {
-					description: "Agent connection state (returned in /status and /events)",
-					fields: {
-						id: "string",
-						connectedAt: "number (unix ms)",
-						paired: "boolean",
-						pairedRelayId: "string | null",
-						messagesForwarded: "number",
-						lastActiveAt: "number (unix ms)",
-						"...AgentMetadata": "spread",
-					},
-				},
-				RelayStatus: {
-					description: "Relay connection state (returned in /status)",
-					fields: {
-						id: "string",
-						connectedAt: "number (unix ms)",
-						pairedAgentId: "string",
-					},
-				},
-				EventListenerStatus: {
-					description: "Event listener connection state (returned in /status)",
-					fields: {
-						id: "string",
-						connectedAt: "number (unix ms)",
-						ip: "string",
-						country: "string",
-						city: "string",
-						userAgent: "string",
-					},
-				},
-				StatusResponse: {
-					description: "Response from GET /status",
-					fields: {
-						agents: "{ count: number, connections: AgentStatus[] }",
-						relays: "{ count: number, connections: RelayStatus[] }",
-						eventListeners: "{ count: number, connections: EventListenerStatus[] }",
-					},
-				},
-				Events: {
-					description: "WebSocket events sent to /events listeners",
-					types: {
-						agent_connected: {
-							description: "Fired when a new agent connects to /agent",
-							fields: { type: "'agent_connected'", agent: "AgentStatus" },
-						},
-						agent_disconnected: {
-							description: "Fired when an agent disconnects",
-							fields: { type: "'agent_disconnected'", agentId: "string" },
-						},
-						agent_paired: {
-							description: "Fired when a relay pairs with an agent via /relay/:agentId",
-							fields: { type: "'agent_paired'", agentId: "string", relayId: "string" },
-						},
-						agent_unpaired: {
-							description: "Fired when a relay disconnects from an agent",
-							fields: { type: "'agent_unpaired'", agentId: "string", relayId: "string" },
-						},
-					},
-				},
-			},
-		};
-
-		return jsonResponse(docs);
+		return new Response(buildDocsHtml(base), {
+			headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders() },
+		});
 	}
 
 	// ── Status endpoint ──────────────────────────────────────────────
@@ -395,7 +250,14 @@ export class RelayHub {
 			ip: request.headers.get("CF-Connecting-IP") || "",
 			country: cf.country || "",
 			city: cf.city || "",
+			region: cf.region || "",
+			continent: cf.continent || "",
+			timezone: cf.timezone || "",
+			asn: cf.asn || 0,
+			asOrganization: cf.asOrganization || "",
 			userAgent: request.headers.get("User-Agent") || "",
+			tlsVersion: cf.tlsVersion || "",
+			httpVersion: cf.httpProtocol || "",
 		};
 		const conn: EventListenerConnection = {
 			id,

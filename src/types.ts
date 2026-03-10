@@ -45,6 +45,13 @@ export interface EventListenerConnection {
 		ip: string;
 		country: string;
 		city: string;
+		region: string;
+		continent: string;
+		timezone: string;
+		asn: number;
+		asOrganization: string;
 		userAgent: string;
+		tlsVersion: string;
+		httpVersion: string;
 	};
 }
