@@ -101,7 +101,7 @@ export class RelayHub {
 				} else if (type === "listener") {
 					this.eventListeners.delete(id);
 					await this.state.storage.delete(`listener:${id}`);
-					try { ws.close(1000, "heartbeat timeout"); } catch {}
+					try { ws.close(1000, "heartbeat timeout"); } catch { }
 				}
 				continue;
 			}
@@ -183,6 +183,10 @@ export class RelayHub {
 			return this.handleStatus();
 		}
 
+		if (url.pathname === "/disconnect-all-agents" && request.method === "POST") {
+			return this.handleDisconnectAllAgents();
+		}
+
 		if (url.pathname === "/agent") {
 			return this.handleAgentUpgrade(request);
 		}
@@ -231,6 +235,16 @@ export class RelayHub {
 				})),
 			},
 		});
+	}
+
+	// ── Disconnect all agents ────────────────────────────────────────
+
+	private async handleDisconnectAllAgents(): Promise<Response> {
+		const agentIds = Array.from(this.agents.keys());
+		for (const id of agentIds) {
+			await this.onAgentDisconnect(id);
+		}
+		return jsonResponse({ disconnected: agentIds.length, agentIds });
 	}
 
 	// ── Events WebSocket (live agent feed) ───────────────────────────
@@ -374,7 +388,7 @@ export class RelayHub {
 			if (relay) {
 				try {
 					relay.ws.close(1000, "agent disconnected");
-				} catch {}
+				} catch { }
 				this.relays.delete(conn.pairedRelayId);
 				await this.state.storage.delete(`relay:${conn.pairedRelayId}`);
 			}
@@ -383,7 +397,7 @@ export class RelayHub {
 
 		try {
 			conn.ws.close(1000, "disconnect");
-		} catch {}
+		} catch { }
 		this.agents.delete(agentId);
 		await this.state.storage.delete(`agent:${agentId}`);
 
@@ -468,7 +482,7 @@ export class RelayHub {
 
 		try {
 			relay.ws.close(1000, "disconnect");
-		} catch {}
+		} catch { }
 		this.relays.delete(relayId);
 		await this.state.storage.delete(`relay:${relayId}`);
 	}
