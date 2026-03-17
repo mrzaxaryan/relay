@@ -2,7 +2,19 @@ import type { AgentConnection, Env } from "./types";
 
 export function authenticate(request: Request, env: Env): Response | null {
 	const headerAuth = request.headers.get("Authorization");
-	const token = headerAuth?.startsWith("Bearer ") ? headerAuth.slice(7) : null;
+	let token = headerAuth?.startsWith("Bearer ") ? headerAuth.slice(7) : null;
+
+	// For WebSocket connections, browsers can't set custom headers.
+	// Accept the token via Sec-WebSocket-Protocol: "bearer-<token>"
+	if (!token) {
+		const protocols = request.headers.get("Sec-WebSocket-Protocol");
+		if (protocols) {
+			const bearerProto = protocols.split(",").map(p => p.trim()).find(p => p.startsWith("bearer-"));
+			if (bearerProto) {
+				token = bearerProto.slice(7); // strip "bearer-"
+			}
+		}
+	}
 
 	if (!token) {
 		return jsonResponse({ error: "unauthorized", message: "Missing or invalid Authorization header" }, 401);

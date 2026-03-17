@@ -22,8 +22,8 @@ export default {
 
 		const url = new URL(request.url);
 
-		// GET / (docs) is public — all other endpoints require auth
-		if (url.pathname !== "/") {
+		// GET / (docs) and /agent are public — all other endpoints require auth
+		if (url.pathname !== "/" && url.pathname !== "/agent") {
 			const authError = authenticate(request, env);
 			if (authError) return authError;
 		}
