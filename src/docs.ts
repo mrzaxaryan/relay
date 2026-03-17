@@ -119,10 +119,9 @@ export function buildDocsHtml(base: string): string {
 <section>
   <h2>Authentication</h2>
   <div class="info-box">
-    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> require a Bearer token.</p>
+    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> require a Bearer token validated against the <code>AUTH_TOKEN</code> secret.</p>
     <dl class="detail-grid" style="margin-bottom: 12px;">
       <dt>Header</dt><dd>Authorization: Bearer &lt;token&gt;</dd>
-      <dt>Query</dt><dd>?token=&lt;token&gt;</dd>
     </dl>
     <div class="error-row"><span class="error-status">401</span><span class="error-body">{ "error": "unauthorized", "message": "Missing or invalid Authorization header" }</span></div>
     <div class="error-row"><span class="error-status">403</span><span class="error-body">{ "error": "forbidden", "message": "Token does not have access to this resource" }</span></div>

@@ -6,13 +6,11 @@ A single Durable Object (`RelayHub`) holds all connections in memory, pairing ag
 
 ## Authentication
 
-All endpoints except `GET /` require a Bearer token.
+All endpoints except `GET /` require a Bearer token validated against the `AUTH_TOKEN` environment variable.
 
 ```
 Authorization: Bearer <token>
 ```
-
-> **Note:** Authentication is not currently enforced — tokens are accepted but not validated.
 
 | Status | Error |
 |--------|-------|
@@ -23,7 +21,7 @@ Authorization: Bearer <token>
 
 | Path | Type | Auth | Description |
 |------|------|------|-------------|
-| `/` | GET | No | API documentation (JSON) |
+| `/` | GET | No | API documentation (HTML) |
 | `/status` | GET | Yes | Live status — connected agents, relays, event listeners |
 | `/disconnect-all-agents` | POST | Yes | Disconnect all connected agents and their paired relays |
 | `/agent` | WebSocket | Yes | Agent connections |

@@ -2,7 +2,7 @@
 // Cloudflare Workers + Durable Objects
 //
 // Endpoints:
-//   /             — API documentation (JSON)
+//   /             — API documentation (HTML)
 //   /status       — Live status + connection data (JSON)
 //   /agent        — Agent WebSocket connections
 //   /relay/:id    — Relay WebSocket (1:1 exclusive pairing to an agent)
