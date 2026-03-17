@@ -215,13 +215,13 @@ export class RelayHub {
 				type: "Bearer",
 				header: "Authorization",
 				format: "Bearer <token>",
-				description: "All endpoints except GET / require a Bearer token in the Authorization header.",
+				description: "All endpoints except GET / require a valid token. Pass via Authorization header or ?token= query parameter.",
 				example: "Authorization: Bearer my-secret-token",
+				queryParam: "?token=my-secret-token",
 				errors: {
 					401: "{ error: 'unauthorized', message: 'Missing or invalid Authorization header' }",
 					403: "{ error: 'forbidden', message: 'Token does not have access to this resource' }",
 				},
-				note: "Authentication is not currently enforced — tokens are accepted but not validated.",
 			},
 			repos: {
 				relay: "https://github.com/mrzaxaryan/relay",

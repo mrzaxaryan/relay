@@ -1,4 +1,24 @@
-import type { AgentConnection } from "./types";
+import type { AgentConnection, Env } from "./types";
+
+export function authenticate(request: Request, env: Env): Response | null {
+	const url = new URL(request.url);
+
+	// Accept token from Authorization header or ?token= query param
+	const headerAuth = request.headers.get("Authorization");
+	const headerToken = headerAuth?.startsWith("Bearer ") ? headerAuth.slice(7) : null;
+	const queryToken = url.searchParams.get("token");
+	const token = headerToken || queryToken;
+
+	if (!token) {
+		return jsonResponse({ error: "unauthorized", message: "Missing or invalid Authorization header" }, 401);
+	}
+
+	if (token !== env.AUTH_TOKEN) {
+		return jsonResponse({ error: "forbidden", message: "Token does not have access to this resource" }, 403);
+	}
+
+	return null; // authorized
+}
 
 export function corsHeaders(): HeadersInit {
 	return {

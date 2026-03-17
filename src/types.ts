@@ -1,5 +1,6 @@
 export interface Env {
 	RELAY_HUB: DurableObjectNamespace;
+	AUTH_TOKEN: string;
 }
 
 export interface AgentMetadata {
