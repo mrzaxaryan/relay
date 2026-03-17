@@ -1,5 +1,6 @@
 import type { Env, AgentMetadata, AgentConnection, RelayConnection, EventListenerConnection } from "./types";
 import { corsHeaders, jsonResponse, toAgentStatus, safeSend } from "./utils";
+import { buildDocsHtml } from "./docs";
 
 export class RelayHub {
 	private agents: Map<string, AgentConnection> = new Map();
@@ -100,7 +101,7 @@ export class RelayHub {
 				} else if (type === "listener") {
 					this.eventListeners.delete(id);
 					await this.state.storage.delete(`listener:${id}`);
-					try { ws.close(1000, "heartbeat timeout"); } catch {}
+					try { ws.close(1000, "heartbeat timeout"); } catch { }
 				}
 				continue;
 			}
@@ -434,7 +435,14 @@ export class RelayHub {
 			ip: request.headers.get("CF-Connecting-IP") || "",
 			country: cf.country || "",
 			city: cf.city || "",
+			region: cf.region || "",
+			continent: cf.continent || "",
+			timezone: cf.timezone || "",
+			asn: cf.asn || 0,
+			asOrganization: cf.asOrganization || "",
 			userAgent: request.headers.get("User-Agent") || "",
+			tlsVersion: cf.tlsVersion || "",
+			httpVersion: cf.httpProtocol || "",
 		};
 		const conn: EventListenerConnection = {
 			id,
@@ -551,7 +559,7 @@ export class RelayHub {
 			if (relay) {
 				try {
 					relay.ws.close(1000, "agent disconnected");
-				} catch {}
+				} catch { }
 				this.relays.delete(conn.pairedRelayId);
 				await this.state.storage.delete(`relay:${conn.pairedRelayId}`);
 			}
@@ -560,7 +568,7 @@ export class RelayHub {
 
 		try {
 			conn.ws.close(1000, "disconnect");
-		} catch {}
+		} catch { }
 		this.agents.delete(agentId);
 		await this.state.storage.delete(`agent:${agentId}`);
 
@@ -645,7 +653,7 @@ export class RelayHub {
 
 		try {
 			relay.ws.close(1000, "disconnect");
-		} catch {}
+		} catch { }
 		this.relays.delete(relayId);
 		await this.state.storage.delete(`relay:${relayId}`);
 	}

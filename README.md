@@ -1,6 +1,6 @@
-# relay
+# Relay
 
-WebSocket relay server for [Position-Independent-Agent](https://github.com/mrzaxaryan/Position-Independent-Agent) — Cloudflare Workers + Durable Objects.
+WebSocket relay server for [Position-Independent-Agent](https://github.com/mrzaxaryan/Position-Independent-Agent) and [Command Center](https://github.com/mrzaxaryan/cc) — built on Cloudflare Workers + Durable Objects.
 
 A single Durable Object (`RelayHub`) holds all connections in memory, pairing agents with relay connections 1:1.
 
@@ -36,7 +36,12 @@ Authorization: Bearer <token>
 2. A **relay** connects to `/relay/:agentId` — this immediately pairs it 1:1 with that agent
 3. All messages flow transparently between the paired WebSockets (string and binary)
 4. If either side disconnects, the pairing is cleaned up and the other side is notified
-5. **Event listeners** on `/events` receive a snapshot of all agents on connect, then live events: `agent_connected`, `agent_disconnected`, `agent_paired`, `agent_unpaired`
+5. **Event listeners** on `/events` receive a snapshot of all agents on connect, then live events
+
+### Heartbeat
+
+- Clients send `ping` frames; the server auto-responds with `pong` (works during hibernation)
+- The server sends `ping` every 30 seconds and considers a client dead after 60 seconds of silence
 
 ### Constraints
 
@@ -44,17 +49,7 @@ Authorization: Bearer <token>
 - Connecting to `/relay/:agentId` returns `404` if the agent doesn't exist
 - Connecting to `/relay/:agentId` returns `409` if the agent already has an active relay
 
-## Status Endpoint
-
-`GET /status` returns:
-
-```json
-{
-  "agents": { "count": 1, "connections": [{ "id": "agent-1-...", "connectedAt": 0, "paired": false, "pairedRelayId": null, "messagesForwarded": 0, "lastActiveAt": 0, "ip": "...", "country": "...", ... }] },
-  "relays": { "count": 0, "connections": [] },
-  "eventListeners": { "count": 0, "connections": [] }
-}
-```
+---
 
 ## Development
 
@@ -64,3 +59,8 @@ npm run dev      # local dev server via wrangler
 npm run deploy   # deploy to Cloudflare
 npm run tail     # stream live logs
 ```
+
+## Related Repositories
+
+- [Position-Independent-Agent](https://github.com/mrzaxaryan/Position-Independent-Agent) — the agent that connects to this relay
+- [Command Center (cc)](https://github.com/mrzaxaryan/cc) — web UI that connects as relay and event listener
