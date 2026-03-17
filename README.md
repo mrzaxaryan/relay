@@ -4,15 +4,31 @@ WebSocket relay server for [Position-Independent-Agent](https://github.com/mrzax
 
 A single Durable Object (`RelayHub`) holds all connections in memory, pairing agents with relay connections 1:1.
 
+## Authentication
+
+All endpoints except `GET /` require a Bearer token.
+
+```
+Authorization: Bearer <token>
+```
+
+> **Note:** Authentication is not currently enforced — tokens are accepted but not validated.
+
+| Status | Error |
+|--------|-------|
+| `401` | `{ error: "unauthorized", message: "Missing or invalid Authorization header" }` |
+| `403` | `{ error: "forbidden", message: "Token does not have access to this resource" }` |
+
 ## Endpoints
 
-| Path | Type | Description |
-|------|------|-------------|
-| `/` | GET | API documentation (JSON) |
-| `/status` | GET | Live status — connected agents, relays, event listeners |
-| `/agent` | WebSocket | Agent connections |
-| `/relay/:agentId` | WebSocket | Relay connection, auto-pairs to agent by ID (exclusive) |
-| `/events` | WebSocket | Live feed of agent and relay events |
+| Path | Type | Auth | Description |
+|------|------|------|-------------|
+| `/` | GET | No | API documentation (JSON) |
+| `/status` | GET | Yes | Live status — connected agents, relays, event listeners |
+| `/disconnect-all-agents` | POST | Yes | Disconnect all connected agents and their paired relays |
+| `/agent` | WebSocket | Yes | Agent connections |
+| `/relay/:agentId` | WebSocket | Yes | Relay connection, auto-pairs to agent by ID (exclusive) |
+| `/events` | WebSocket | Yes | Live feed of agent and relay events |
 
 ## How It Works
 

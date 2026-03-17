@@ -210,6 +210,18 @@ export class RelayHub {
 		const docs = {
 			service: "relay",
 			description: "WebSocket relay server for Position-Independent-Agent and Command Center",
+			authentication: {
+				type: "Bearer",
+				header: "Authorization",
+				format: "Bearer <token>",
+				description: "All endpoints except GET / require a Bearer token in the Authorization header.",
+				example: "Authorization: Bearer my-secret-token",
+				errors: {
+					401: "{ error: 'unauthorized', message: 'Missing or invalid Authorization header' }",
+					403: "{ error: 'forbidden', message: 'Token does not have access to this resource' }",
+				},
+				note: "Authentication is not currently enforced — tokens are accepted but not validated.",
+			},
 			repos: {
 				relay: "https://github.com/mrzaxaryan/relay",
 				agent: "https://github.com/mrzaxaryan/Position-Independent-Agent",
@@ -221,6 +233,7 @@ export class RelayHub {
 					path: "/",
 					url: `${base}/`,
 					description: "API documentation (this response)",
+					auth: false,
 					returns: "ApiDocs",
 				},
 				{
@@ -228,6 +241,7 @@ export class RelayHub {
 					path: "/status",
 					url: `${base}/status`,
 					description: "Live status — connected agents, relays, and event listeners with full connection details",
+					auth: true,
 					returns: "StatusResponse",
 				},
 				{
@@ -235,6 +249,7 @@ export class RelayHub {
 					path: "/disconnect-all-agents",
 					url: `${base}/disconnect-all-agents`,
 					description: "Disconnect all connected agents (and their paired relays). Returns the count and IDs of disconnected agents.",
+					auth: true,
 					returns: "{ disconnected: number, agentIds: string[] }",
 				},
 				{
@@ -242,6 +257,7 @@ export class RelayHub {
 					path: "/agent",
 					url: `${base}/agent`,
 					description: "Agent WebSocket connection. Server assigns an ID and broadcasts agent_connected to event listeners.",
+					auth: true,
 					messages: {
 						incoming: "any (forwarded to paired relay)",
 						outgoing: "any (forwarded from paired relay)",
@@ -252,6 +268,7 @@ export class RelayHub {
 					path: "/relay/:agentId",
 					url: `${base}/relay/{agentId}`,
 					description: "Relay WebSocket — 1:1 exclusive pairing to an agent. Returns 404 if agent not found, 409 if already paired.",
+					auth: true,
 					messages: {
 						incoming: "any (forwarded to paired agent)",
 						outgoing: "any (forwarded from paired agent)",
@@ -266,6 +283,7 @@ export class RelayHub {
 					path: "/events",
 					url: `${base}/events`,
 					description: "Live feed — sends all agents on connect, then real-time agent and relay events",
+					auth: true,
 					messages: {
 						onConnect: "{ type: 'agents', agents: AgentStatus[] }",
 						events: [
