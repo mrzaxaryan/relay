@@ -2,13 +2,6 @@ import type { Env, AgentMetadata, AgentConnection, RelayConnection, EventListene
 import { corsHeaders, jsonResponse, toAgentStatus, safeSend } from "./utils";
 import { buildDocsHtml } from "./docs";
 
-/** Extract the bearer protocol from Sec-WebSocket-Protocol if present, for echoing back. */
-function getWebSocketProtocol(request: Request): string | null {
-	const protocols = request.headers.get("Sec-WebSocket-Protocol");
-	if (!protocols) return null;
-	const bearerProto = protocols.split(",").map(p => p.trim()).find(p => p.startsWith("bearer-"));
-	return bearerProto || null;
-}
 
 export class RelayHub {
 	private agents: Map<string, AgentConnection> = new Map();
@@ -300,9 +293,7 @@ export class RelayHub {
 			agents: Array.from(this.agents.values()).map(toAgentStatus),
 		});
 
-		const proto = getWebSocketProtocol(request);
-		const headers: HeadersInit = proto ? { "Sec-WebSocket-Protocol": proto } : {};
-		return new Response(null, { status: 101, webSocket: client, headers });
+		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private broadcastEvent(event: object): void {
@@ -367,9 +358,7 @@ export class RelayHub {
 		this.broadcastEvent({ type: "agent_connected", agent: toAgentStatus(conn) });
 		await this.scheduleNextHeartbeat();
 
-		const agentProto = getWebSocketProtocol(request);
-		const agentHeaders: HeadersInit = agentProto ? { "Sec-WebSocket-Protocol": agentProto } : {};
-		return new Response(null, { status: 101, webSocket: client, headers: agentHeaders });
+		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private onAgentMessage(agentId: string, data: string | ArrayBuffer): void {
@@ -460,9 +449,7 @@ export class RelayHub {
 		this.broadcastEvent({ type: "agent_paired", agentId, relayId });
 		await this.scheduleNextHeartbeat();
 
-		const relayProto = getWebSocketProtocol(request);
-		const relayHeaders: HeadersInit = relayProto ? { "Sec-WebSocket-Protocol": relayProto } : {};
-		return new Response(null, { status: 101, webSocket: client, headers: relayHeaders });
+		return new Response(null, { status: 101, webSocket: client });
 	}
 
 	private onRelayMessage(relayId: string, data: string | ArrayBuffer): void {

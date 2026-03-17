@@ -5,19 +5,14 @@ export function authenticate(request: Request, env: Env): Response | null {
 	let token = headerAuth?.startsWith("Bearer ") ? headerAuth.slice(7) : null;
 
 	// For WebSocket connections, browsers can't set custom headers.
-	// Accept the token via Sec-WebSocket-Protocol: "bearer-<token>"
+	// Accept the token via ?token= query parameter.
 	if (!token) {
-		const protocols = request.headers.get("Sec-WebSocket-Protocol");
-		if (protocols) {
-			const bearerProto = protocols.split(",").map(p => p.trim()).find(p => p.startsWith("bearer-"));
-			if (bearerProto) {
-				token = bearerProto.slice(7); // strip "bearer-"
-			}
-		}
+		const url = new URL(request.url);
+		token = url.searchParams.get("token");
 	}
 
 	if (!token) {
-		return jsonResponse({ error: "unauthorized", message: "Missing or invalid Authorization header" }, 401);
+		return jsonResponse({ error: "unauthorized", message: "Missing or invalid token" }, 401);
 	}
 
 	// if (token !== env.AUTH_TOKEN) {

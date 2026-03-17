@@ -119,11 +119,12 @@ export function buildDocsHtml(base: string): string {
 <section>
   <h2>Authentication</h2>
   <div class="info-box">
-    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> require a Bearer token validated against the <code>AUTH_TOKEN</code> secret.</p>
+    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> and <code>/agent</code> require a token validated against the <code>AUTH_TOKEN</code> secret.</p>
     <dl class="detail-grid" style="margin-bottom: 12px;">
-      <dt>Header</dt><dd>Authorization: Bearer &lt;token&gt;</dd>
+      <dt>HTTP</dt><dd>Authorization: Bearer &lt;token&gt;</dd>
+      <dt>WebSocket</dt><dd>?token=&lt;token&gt; query parameter</dd>
     </dl>
-    <div class="error-row"><span class="error-status">401</span><span class="error-body">{ "error": "unauthorized", "message": "Missing or invalid Authorization header" }</span></div>
+    <div class="error-row"><span class="error-status">401</span><span class="error-body">{ "error": "unauthorized", "message": "Missing or invalid token" }</span></div>
     <div class="error-row"><span class="error-status">403</span><span class="error-body">{ "error": "forbidden", "message": "Token does not have access to this resource" }</span></div>
   </div>
 </section>
@@ -169,7 +170,6 @@ export function buildDocsHtml(base: string): string {
     <div class="endpoint-header">
       <span class="method method-ws">WS</span>
       <span class="path">/agent</span>
-      <span class="badge badge-auth">AUTH</span>
     </div>
     <div class="endpoint-desc">Agent WebSocket connection. Server assigns a unique ID and broadcasts <code>agent_connected</code> to all event listeners.</div>
     <div class="endpoint-url"><code>${ws}/agent</code></div>
@@ -188,7 +188,7 @@ export function buildDocsHtml(base: string): string {
       <span class="badge badge-auth">AUTH</span>
     </div>
     <div class="endpoint-desc">Relay WebSocket with exclusive 1:1 pairing to the specified agent.</div>
-    <div class="endpoint-url"><code>${ws}/relay/{agentId}</code></div>
+    <div class="endpoint-url"><code>${ws}/relay/{agentId}?token=&lt;token&gt;</code></div>
     <div class="endpoint-body">
       <dl class="detail-grid">
         <dt>send</dt><dd>any &mdash; forwarded to paired agent</dd>
@@ -208,7 +208,7 @@ export function buildDocsHtml(base: string): string {
       <span class="badge badge-auth">AUTH</span>
     </div>
     <div class="endpoint-desc">Live event feed. Sends a snapshot of all agents on connect, then real-time events.</div>
-    <div class="endpoint-url"><code>${ws}/events</code></div>
+    <div class="endpoint-url"><code>${ws}/events?token=&lt;token&gt;</code></div>
     <div class="endpoint-body">
       <p style="font-size:13px; color:var(--muted); margin-bottom:8px;"><strong style="color:var(--text)">On connect:</strong> <code>{ "type": "agents", "agents": AgentStatus[] }</code></p>
       <ul class="events-list">
