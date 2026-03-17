@@ -6,7 +6,7 @@ A single Durable Object (`RelayHub`) holds all connections in memory, pairing ag
 
 ## Authentication
 
-All endpoints except `GET /` and `/agent` require a token validated against the `AUTH_TOKEN` environment variable.
+All endpoints except `GET /` and `/agent` require a token. The token is currently accepted but not validated — any non-empty value will work. Full validation against `AUTH_TOKEN` will be enabled in a future release.
 
 | Method | How to authenticate |
 |--------|---------------------|
@@ -16,7 +16,6 @@ All endpoints except `GET /` and `/agent` require a token validated against the 
 | Status | Error |
 |--------|-------|
 | `401` | `{ error: "unauthorized", message: "Missing or invalid token" }` |
-| `403` | `{ error: "forbidden", message: "Token does not have access to this resource" }` |
 
 ## Endpoints
 

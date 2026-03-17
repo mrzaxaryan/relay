@@ -119,13 +119,12 @@ export function buildDocsHtml(base: string): string {
 <section>
   <h2>Authentication</h2>
   <div class="info-box">
-    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> and <code>/agent</code> require a token validated against the <code>AUTH_TOKEN</code> secret.</p>
+    <p style="margin-bottom: 12px;">All endpoints except <code>GET /</code> and <code>/agent</code> require a token. Currently accepted but <strong>not validated</strong> &mdash; any non-empty value works.</p>
     <dl class="detail-grid" style="margin-bottom: 12px;">
       <dt>HTTP</dt><dd>Authorization: Bearer &lt;token&gt;</dd>
       <dt>WebSocket</dt><dd>?token=&lt;token&gt; query parameter</dd>
     </dl>
     <div class="error-row"><span class="error-status">401</span><span class="error-body">{ "error": "unauthorized", "message": "Missing or invalid token" }</span></div>
-    <div class="error-row"><span class="error-status">403</span><span class="error-body">{ "error": "forbidden", "message": "Token does not have access to this resource" }</span></div>
   </div>
 </section>
 

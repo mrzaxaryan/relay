@@ -1,6 +1,6 @@
 import type { AgentConnection, Env } from "./types";
 
-export function authenticate(request: Request, env: Env): Response | null {
+export function authenticate(request: Request, _env: Env): Response | null {
 	const headerAuth = request.headers.get("Authorization");
 	let token = headerAuth?.startsWith("Bearer ") ? headerAuth.slice(7) : null;
 
@@ -15,11 +15,8 @@ export function authenticate(request: Request, env: Env): Response | null {
 		return jsonResponse({ error: "unauthorized", message: "Missing or invalid token" }, 401);
 	}
 
-	// if (token !== env.AUTH_TOKEN) {
-	// 	return jsonResponse({ error: "forbidden", message: "Token does not have access to this resource" }, 403);
-	// }
-
-	return null; // authorized
+	// TODO: validate token against env.AUTH_TOKEN
+	return null;
 }
 
 export function corsHeaders(): HeadersInit {
