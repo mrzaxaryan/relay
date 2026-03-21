@@ -45,7 +45,7 @@ export class RelayHub {
 						pairedRelayId: meta.pairedRelayId,
 						metadata: meta.metadata,
 						messagesForwarded: 0,
-						lastActiveAt: meta.connectedAt,
+						lastActiveAt: Date.now(),
 					});
 				}
 			} else if (type === "relay") {
@@ -53,14 +53,14 @@ export class RelayHub {
 					| { connectedAt: number; pairedAgentId: string }
 					| undefined;
 				if (meta) {
-					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, pairedAgentId: meta.pairedAgentId });
+					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, pairedAgentId: meta.pairedAgentId, lastActiveAt: Date.now() });
 				}
 			} else if (type === "listener") {
 				const meta = stored.get(`listener:${id}`) as
 					| { connectedAt: number; metadata: EventListenerConnection["metadata"] }
 					| undefined;
 				if (meta) {
-					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, metadata: meta.metadata });
+					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, lastActiveAt: Date.now(), metadata: meta.metadata });
 				}
 			}
 		}
@@ -91,10 +91,23 @@ export class RelayHub {
 			if (!tags || tags.length < 2) continue;
 			const [type, id] = tags;
 
-			// Check last auto-response timestamp (last time client sent "ping" and got "pong")
+			// Determine last known alive time from auto-response OR lastActiveAt
 			const lastResponse = ws.getLastAutoResponseTimestamp();
-			if (lastResponse && now - lastResponse.getTime() > RelayHub.HEARTBEAT_TIMEOUT_MS) {
-				// Client hasn't pinged in too long — consider dead
+			let lastAlive = lastResponse?.getTime() ?? 0;
+
+			if (type === "agent") {
+				const agent = this.agents.get(id);
+				if (agent) lastAlive = Math.max(lastAlive, agent.lastActiveAt);
+			} else if (type === "relay") {
+				const relay = this.relays.get(id);
+				if (relay) lastAlive = Math.max(lastAlive, relay.lastActiveAt);
+			} else if (type === "listener") {
+				const listener = this.eventListeners.get(id);
+				if (listener) lastAlive = Math.max(lastAlive, listener.lastActiveAt);
+			}
+
+			if (lastAlive > 0 && now - lastAlive > RelayHub.HEARTBEAT_TIMEOUT_MS) {
+				// Connection hasn't shown any sign of life — consider dead
 				if (type === "agent") {
 					await this.onAgentDisconnect(id);
 				} else if (type === "relay") {
@@ -134,12 +147,26 @@ export class RelayHub {
 		await this.hydrateIfNeeded();
 		const [type, id] = (this.state.getTags(ws) ?? []);
 
+		// Any received message is a sign of life — update lastActiveAt
+		if (type === "agent") {
+			const agent = this.agents.get(id);
+			if (agent) agent.lastActiveAt = Date.now();
+		} else if (type === "relay") {
+			const relay = this.relays.get(id);
+			if (relay) relay.lastActiveAt = Date.now();
+		} else if (type === "listener") {
+			const listener = this.eventListeners.get(id);
+			if (listener) listener.lastActiveAt = Date.now();
+		}
+
+		// Don't forward heartbeat responses to paired connections
+		if (typeof data === "string" && data === "pong") return;
+
 		if (type === "agent") {
 			this.onAgentMessage(id, data);
 		} else if (type === "relay") {
 			this.onRelayMessage(id, data);
 		}
-		// event listeners don't send meaningful messages
 	}
 
 	async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
@@ -278,6 +305,7 @@ export class RelayHub {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
+			lastActiveAt: Date.now(),
 			metadata,
 		};
 
@@ -431,6 +459,7 @@ export class RelayHub {
 			ws: server,
 			connectedAt: Date.now(),
 			pairedAgentId: agentId,
+			lastActiveAt: Date.now(),
 		};
 
 		this.state.acceptWebSocket(server, ["relay", relayId]);
