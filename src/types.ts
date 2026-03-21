@@ -36,14 +36,12 @@ export interface RelayConnection {
 	ws: WebSocket;
 	connectedAt: number;
 	pairedAgentId: string;
-	lastActiveAt: number;
 }
 
 export interface EventListenerConnection {
 	id: string;
 	ws: WebSocket;
 	connectedAt: number;
-	lastActiveAt: number;
 	metadata: {
 		ip: string;
 		country: string;

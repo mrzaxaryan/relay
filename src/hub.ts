@@ -8,16 +8,11 @@ export class RelayHub {
 	private relays: Map<string, RelayConnection> = new Map();
 	private eventListeners: Map<string, EventListenerConnection> = new Map();
 	private hydrated = false;
-	private static readonly HEARTBEAT_INTERVAL_MS = 30_000;
-	private static readonly HEARTBEAT_TIMEOUT_MS = 60_000;
 
 	constructor(
 		private state: DurableObjectState,
 		private env: Env
-	) {
-		// Auto-respond "pong" to client-sent "ping" (works during hibernation)
-		this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
-	}
+	) {}
 
 	// ── State hydration (survives hibernation) ─────────────────────
 
@@ -45,7 +40,7 @@ export class RelayHub {
 						pairedRelayId: meta.pairedRelayId,
 						metadata: meta.metadata,
 						messagesForwarded: 0,
-						lastActiveAt: Date.now(),
+						lastActiveAt: meta.connectedAt,
 					});
 				}
 			} else if (type === "relay") {
@@ -53,14 +48,14 @@ export class RelayHub {
 					| { connectedAt: number; pairedAgentId: string }
 					| undefined;
 				if (meta) {
-					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, pairedAgentId: meta.pairedAgentId, lastActiveAt: Date.now() });
+					this.relays.set(id, { id, ws, connectedAt: meta.connectedAt, pairedAgentId: meta.pairedAgentId });
 				}
 			} else if (type === "listener") {
 				const meta = stored.get(`listener:${id}`) as
 					| { connectedAt: number; metadata: EventListenerConnection["metadata"] }
 					| undefined;
 				if (meta) {
-					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, lastActiveAt: Date.now(), metadata: meta.metadata });
+					this.eventListeners.set(id, { id, ws, connectedAt: meta.connectedAt, metadata: meta.metadata });
 				}
 			}
 		}
@@ -71,96 +66,15 @@ export class RelayHub {
 		return `${prefix}-${Date.now().toString(36)}-${rand}`;
 	}
 
-	// ── Alarm-based server→agent heartbeat ─────────────────────────
-
-	private async scheduleNextHeartbeat(): Promise<void> {
-		const existing = await this.state.storage.getAlarm();
-		if (!existing) {
-			await this.state.storage.setAlarm(Date.now() + RelayHub.HEARTBEAT_INTERVAL_MS);
-		}
-	}
-
-	async alarm(): Promise<void> {
-		await this.hydrateIfNeeded();
-
-		const now = Date.now();
-		const sockets = this.state.getWebSockets();
-
-		for (const ws of sockets) {
-			const tags = this.state.getTags(ws);
-			if (!tags || tags.length < 2) continue;
-			const [type, id] = tags;
-
-			// Determine last known alive time from auto-response OR lastActiveAt
-			const lastResponse = ws.getLastAutoResponseTimestamp();
-			let lastAlive = lastResponse?.getTime() ?? 0;
-
-			if (type === "agent") {
-				const agent = this.agents.get(id);
-				if (agent) lastAlive = Math.max(lastAlive, agent.lastActiveAt);
-			} else if (type === "relay") {
-				const relay = this.relays.get(id);
-				if (relay) lastAlive = Math.max(lastAlive, relay.lastActiveAt);
-			} else if (type === "listener") {
-				const listener = this.eventListeners.get(id);
-				if (listener) lastAlive = Math.max(lastAlive, listener.lastActiveAt);
-			}
-
-			if (lastAlive > 0 && now - lastAlive > RelayHub.HEARTBEAT_TIMEOUT_MS) {
-				// Connection hasn't shown any sign of life — consider dead
-				if (type === "agent") {
-					await this.onAgentDisconnect(id);
-				} else if (type === "relay") {
-					await this.onRelayDisconnect(id);
-				} else if (type === "listener") {
-					this.eventListeners.delete(id);
-					await this.state.storage.delete(`listener:${id}`);
-					try { ws.close(1000, "heartbeat timeout"); } catch { }
-				}
-				continue;
-			}
-
-			// Send server→client ping
-			try {
-				ws.send("ping");
-			} catch {
-				if (type === "agent") {
-					await this.onAgentDisconnect(id);
-				} else if (type === "relay") {
-					await this.onRelayDisconnect(id);
-				} else if (type === "listener") {
-					this.eventListeners.delete(id);
-					await this.state.storage.delete(`listener:${id}`);
-				}
-			}
-		}
-
-		// Re-schedule if there are still active connections
-		if (this.agents.size > 0 || this.relays.size > 0 || this.eventListeners.size > 0) {
-			await this.state.storage.setAlarm(now + RelayHub.HEARTBEAT_INTERVAL_MS);
-		}
-	}
-
 	// ── Hibernation WebSocket handlers ──────────────────────────────
+	//
+	// Dead-connection detection relies on Cloudflare's TCP-level
+	// mechanisms: when the underlying TCP connection drops, CF fires
+	// webSocketClose / webSocketError which trigger cleanup.
 
 	async webSocketMessage(ws: WebSocket, data: string | ArrayBuffer): Promise<void> {
 		await this.hydrateIfNeeded();
 		const [type, id] = (this.state.getTags(ws) ?? []);
-
-		// Any received message is a sign of life — update lastActiveAt
-		if (type === "agent") {
-			const agent = this.agents.get(id);
-			if (agent) agent.lastActiveAt = Date.now();
-		} else if (type === "relay") {
-			const relay = this.relays.get(id);
-			if (relay) relay.lastActiveAt = Date.now();
-		} else if (type === "listener") {
-			const listener = this.eventListeners.get(id);
-			if (listener) listener.lastActiveAt = Date.now();
-		}
-
-		// Don't forward heartbeat responses to paired connections
-		if (typeof data === "string" && data === "pong") return;
 
 		if (type === "agent") {
 			this.onAgentMessage(id, data);
@@ -305,15 +219,12 @@ export class RelayHub {
 			id,
 			ws: server,
 			connectedAt: Date.now(),
-			lastActiveAt: Date.now(),
 			metadata,
 		};
 
 		this.state.acceptWebSocket(server, ["listener", id]);
 		this.eventListeners.set(id, conn);
 		await this.state.storage.put(`listener:${id}`, { connectedAt: conn.connectedAt, metadata });
-
-		await this.scheduleNextHeartbeat();
 
 		// Send current agents snapshot
 		safeSend(server, {
@@ -384,7 +295,6 @@ export class RelayHub {
 		});
 
 		this.broadcastEvent({ type: "agent_connected", agent: toAgentStatus(conn) });
-		await this.scheduleNextHeartbeat();
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
@@ -459,7 +369,6 @@ export class RelayHub {
 			ws: server,
 			connectedAt: Date.now(),
 			pairedAgentId: agentId,
-			lastActiveAt: Date.now(),
 		};
 
 		this.state.acceptWebSocket(server, ["relay", relayId]);
@@ -476,7 +385,6 @@ export class RelayHub {
 		]);
 
 		this.broadcastEvent({ type: "agent_paired", agentId, relayId });
-		await this.scheduleNextHeartbeat();
 
 		return new Response(null, { status: 101, webSocket: client });
 	}
